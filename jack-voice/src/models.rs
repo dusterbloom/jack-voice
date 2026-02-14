@@ -7,6 +7,8 @@ use std::io::{Read, Write as IoWrite};
 use std::path::PathBuf;
 use std::sync::RwLock;
 
+use pocket_tts::weights::download_if_necessary as download_hf_asset_if_needed;
+
 /// Callback trait for model download progress reporting
 pub trait ModelProgressCallback: Send + Sync {
     fn on_download_start(&self, model: &str, size_mb: u64);
@@ -197,6 +199,15 @@ pub const KOKORO_MODEL: ModelBundle = ModelBundle {
     size_mb: 310,
 };
 
+pub const POCKET_TTS_VARIANT: &str = "b6369a24";
+pub const POCKET_TTS_WEIGHTS_HF_PATH: &str =
+    "hf://kyutai/pocket-tts/tts_b6369a24.safetensors@427e3d61b276ed69fdd03de0d185fa8a8d97fc5b";
+pub const POCKET_TTS_TOKENIZER_HF_PATH: &str =
+    "hf://kyutai/pocket-tts-without-voice-cloning/tokenizer.model@d4fdd22ae8c8e1cb3634e150ebeff1dab2d16df3";
+pub const POCKET_TTS_PRESET_VOICES: &[&str] = &[
+    "alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma",
+];
+
 /// Get the models directory
 pub fn get_models_dir() -> Result<PathBuf, ModelError> {
     // Check for override first
@@ -255,6 +266,78 @@ pub fn whisper_turbo_model_ready() -> bool {
 
 pub fn kokoro_model_ready() -> bool {
     model_exists(KOKORO_MODEL.extract_dir)
+}
+
+fn huggingface_hub_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(hf_home) = std::env::var("HF_HOME") {
+        let hf_home = hf_home.trim();
+        if !hf_home.is_empty() {
+            candidates.push(PathBuf::from(hf_home).join("hub"));
+        }
+    }
+
+    if let Some(home_dir) = dirs::home_dir() {
+        candidates.push(home_dir.join(".cache").join("huggingface").join("hub"));
+    }
+
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        let user_profile = user_profile.trim();
+        if !user_profile.is_empty() {
+            candidates.push(
+                PathBuf::from(user_profile)
+                    .join(".cache")
+                    .join("huggingface")
+                    .join("hub"),
+            );
+        }
+    }
+
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let local_app_data = local_app_data.trim();
+        if !local_app_data.is_empty() {
+            candidates.push(
+                PathBuf::from(local_app_data)
+                    .join("huggingface")
+                    .join("hub"),
+            );
+        }
+    }
+
+    candidates
+}
+
+fn hf_repo_snapshot_contains(repo_cache_name: &str, relative_path: &str) -> bool {
+    for hub_dir in huggingface_hub_dir_candidates() {
+        let snapshots_dir = hub_dir.join(repo_cache_name).join("snapshots");
+        if !snapshots_dir.exists() {
+            continue;
+        }
+
+        if let Ok(entries) = fs::read_dir(&snapshots_dir) {
+            for entry in entries.flatten() {
+                let snapshot_file = entry.path().join(relative_path);
+                if snapshot_file.exists() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+pub fn pocket_model_ready() -> bool {
+    hf_repo_snapshot_contains("models--kyutai--pocket-tts", "tts_b6369a24.safetensors")
+        && hf_repo_snapshot_contains(
+            "models--kyutai--pocket-tts-without-voice-cloning",
+            "tokenizer.model",
+        )
+        && hf_repo_snapshot_contains(
+            "models--kyutai--pocket-tts-without-voice-cloning",
+            "embeddings/alba.safetensors",
+        )
 }
 
 pub fn paraformer_model_ready() -> bool {
@@ -576,6 +659,7 @@ pub async fn ensure_models(progress: &dyn ModelProgressCallback) -> Result<(), M
 
     ensure_supertonic_models(progress).await?;
     ensure_kokoro_model(progress).await?;
+    ensure_pocket_model(progress).await?;
     ensure_moonshine_model(progress).await?;
     ensure_parakeet_models(progress).await?;
 
@@ -633,6 +717,52 @@ pub async fn ensure_kokoro_model(progress: &dyn ModelProgressCallback) -> Result
     progress.on_download_start(KOKORO_MODEL.name, KOKORO_MODEL.size_mb);
     download_model(&KOKORO_MODEL, progress).await?;
     progress.on_download_complete(KOKORO_MODEL.name);
+    Ok(())
+}
+
+pub async fn ensure_pocket_model(progress: &dyn ModelProgressCallback) -> Result<(), ModelError> {
+    if pocket_model_ready() {
+        return Ok(());
+    }
+
+    let hf_token = std::env::var("HF_TOKEN").unwrap_or_default();
+    if hf_token.trim().is_empty() {
+        log::warn!(
+            "[MODELS] Skipping Pocket TTS '{}': HF_TOKEN not set (gated model)",
+            POCKET_TTS_VARIANT
+        );
+        return Ok(());
+    }
+
+    progress.on_download_start("pocket-tts", 0);
+
+    let voice_assets: Vec<String> = POCKET_TTS_PRESET_VOICES
+        .iter()
+        .map(|voice| {
+            format!(
+                "hf://kyutai/pocket-tts-without-voice-cloning/embeddings/{}.safetensors",
+                voice
+            )
+        })
+        .collect();
+
+    tokio::task::spawn_blocking(move || -> Result<(), ModelError> {
+        download_hf_asset_if_needed(POCKET_TTS_WEIGHTS_HF_PATH)
+            .map_err(|e| ModelError::DownloadError(e.to_string()))?;
+        download_hf_asset_if_needed(POCKET_TTS_TOKENIZER_HF_PATH)
+            .map_err(|e| ModelError::DownloadError(e.to_string()))?;
+
+        for voice_asset in &voice_assets {
+            download_hf_asset_if_needed(voice_asset)
+                .map_err(|e| ModelError::DownloadError(e.to_string()))?;
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| ModelError::DownloadError(e.to_string()))??;
+
+    progress.on_download_complete("pocket-tts");
     Ok(())
 }
 

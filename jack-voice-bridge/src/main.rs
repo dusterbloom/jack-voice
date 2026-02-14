@@ -46,6 +46,7 @@ struct SttCacheKey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CachedTtsEngine {
+    Pocket,
     Supertonic,
     Kokoro,
 }
@@ -53,6 +54,7 @@ enum CachedTtsEngine {
 impl CachedTtsEngine {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Pocket => "pocket",
             Self::Supertonic => "supertonic",
             Self::Kokoro => "kokoro",
         }
@@ -60,6 +62,7 @@ impl CachedTtsEngine {
 
     fn as_jack_voice_engine(self) -> TtsEngine {
         match self {
+            Self::Pocket => TtsEngine::Pocket,
             Self::Supertonic => TtsEngine::Supertonic,
             Self::Kokoro => TtsEngine::Kokoro,
         }
@@ -69,6 +72,7 @@ impl CachedTtsEngine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestedTtsEngine {
     Auto,
+    Pocket,
     Supertonic,
     Kokoro,
 }
@@ -443,6 +447,7 @@ fn build_models_status() -> Result<Value, RpcError> {
         "moonshine": models::moonshine_model_ready(),
         "whisper_turbo": models::whisper_turbo_model_ready(),
         "kokoro": models::kokoro_model_ready(),
+        "pocket": models::pocket_model_ready(),
         "paraformer": models::paraformer_model_ready(),
         "parakeet_eou": models::parakeet_eou_ready(),
         "parakeet_tdt": models::parakeet_tdt_ready(),
@@ -464,6 +469,9 @@ fn build_models_status() -> Result<Value, RpcError> {
     }
     if !models::kokoro_model_ready() {
         missing.push("kokoro-multi-lang-v1_0");
+    }
+    if !models::pocket_model_ready() {
+        missing.push("pocket-tts");
     }
     if !models::parakeet_eou_ready() {
         missing.push("parakeet-eou");
@@ -529,6 +537,7 @@ async fn ensure_models_without_stdout(
 
     models::ensure_supertonic_models(progress).await?;
     models::ensure_kokoro_model(progress).await?;
+    models::ensure_pocket_model(progress).await?;
     models::ensure_moonshine_model(progress).await?;
     models::ensure_parakeet_models(progress).await?;
 
@@ -696,25 +705,39 @@ fn ensure_tts_instance(
                 return Ok(current);
             }
 
-            match TextToSpeech::with_engine(TtsEngine::Supertonic) {
+            match TextToSpeech::with_engine(TtsEngine::Pocket) {
                 Ok(tts) => {
                     state.tts = Some(tts);
-                    state.tts_engine = Some(CachedTtsEngine::Supertonic);
-                    Ok(CachedTtsEngine::Supertonic)
+                    state.tts_engine = Some(CachedTtsEngine::Pocket);
+                    Ok(CachedTtsEngine::Pocket)
                 }
-                Err(supertonic_err) => {
+                Err(pocket_err) => {
                     eprintln!(
-                        "[bridge] auto TTS fallback: supertonic init failed ({supertonic_err}), trying kokoro"
+                        "[bridge] auto TTS fallback: pocket init failed ({pocket_err}), trying kokoro"
                     );
 
-                    let kokoro =
-                        TextToSpeech::with_engine(TtsEngine::Kokoro).map_err(map_tts_error)?;
-                    state.tts = Some(kokoro);
-                    state.tts_engine = Some(CachedTtsEngine::Kokoro);
-                    Ok(CachedTtsEngine::Kokoro)
+                    match TextToSpeech::with_engine(TtsEngine::Kokoro) {
+                        Ok(kokoro) => {
+                            state.tts = Some(kokoro);
+                            state.tts_engine = Some(CachedTtsEngine::Kokoro);
+                            Ok(CachedTtsEngine::Kokoro)
+                        }
+                        Err(kokoro_err) => {
+                            eprintln!(
+                                "[bridge] auto TTS fallback: kokoro init failed ({kokoro_err}), trying supertonic"
+                            );
+
+                            let supertonic = TextToSpeech::with_engine(TtsEngine::Supertonic)
+                                .map_err(map_tts_error)?;
+                            state.tts = Some(supertonic);
+                            state.tts_engine = Some(CachedTtsEngine::Supertonic);
+                            Ok(CachedTtsEngine::Supertonic)
+                        }
+                    }
                 }
             }
         }
+        RequestedTtsEngine::Pocket => set_tts_engine(state, CachedTtsEngine::Pocket),
         RequestedTtsEngine::Supertonic => set_tts_engine(state, CachedTtsEngine::Supertonic),
         RequestedTtsEngine::Kokoro => set_tts_engine(state, CachedTtsEngine::Kokoro),
     }
@@ -752,6 +775,7 @@ fn parse_tts_engine(engine: Option<&str>) -> Result<RequestedTtsEngine, RpcError
 
     match engine.as_str() {
         "auto" => Ok(RequestedTtsEngine::Auto),
+        "pocket" => Ok(RequestedTtsEngine::Pocket),
         "supertonic" => Ok(RequestedTtsEngine::Supertonic),
         "kokoro" => Ok(RequestedTtsEngine::Kokoro),
         other => Err(RpcError::new(
@@ -827,4 +851,32 @@ fn write_response(stdout: &mut dyn Write, response: &ResponseEnvelope) -> io::Re
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
     writeln!(stdout, "{encoded}")?;
     stdout.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tts_engine_accepts_pocket() {
+        assert!(matches!(
+            parse_tts_engine(Some("pocket")),
+            Ok(RequestedTtsEngine::Pocket)
+        ));
+        assert!(matches!(
+            parse_tts_engine(Some("POCKET")),
+            Ok(RequestedTtsEngine::Pocket)
+        ));
+    }
+
+    #[test]
+    fn parse_tts_engine_rejects_unknown() {
+        let err = parse_tts_engine(Some("not-an-engine")).expect_err("expected parse error");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(
+            err.message.contains("Unsupported tts engine"),
+            "unexpected message: {}",
+            err.message
+        );
+    }
 }

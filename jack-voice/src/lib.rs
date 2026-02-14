@@ -1,6 +1,6 @@
 //! Jack Voice - Production-quality voice pipeline
 //!
-//! Provides VAD (Silero), STT (Whisper/Moonshine/Parakeet), TTS (Supertonic/Kokoro),
+//! Provides VAD (Silero), STT (Whisper/Moonshine/Parakeet), TTS (Pocket/Supertonic/Kokoro),
 //! turn detection (SmartTurn), audio capture/playback, and voice calibration.
 //!
 //! Extracted from jack-desktop as a standalone, framework-agnostic crate.

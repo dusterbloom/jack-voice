@@ -113,8 +113,8 @@ pub struct VoicePipelineConfig {
 impl Default for VoicePipelineConfig {
     fn default() -> Self {
         Self {
-            tts_engine: TtsEngine::Supertonic,
-            tts_voice: "F1".to_string(),
+            tts_engine: TtsEngine::Pocket,
+            tts_voice: "alba".to_string(),
             tts_speed: 1.0,
             stt_mode: SttMode::Streaming,
             stt_language: String::new(),

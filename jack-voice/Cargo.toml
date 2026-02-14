@@ -18,6 +18,9 @@ sherpa-rs = { version = "0.6", default-features = false }
 # Kokoro TTS (multilingual)
 kokoro-tiny = { version = "0.1.0", default-features = false, features = ["playback"] }
 
+# Pocket TTS (English, Candle-based)
+pocket-tts = "0.6.2"
+
 # Parakeet STT (multilingual)
 parakeet-rs = { version = "0.3", default-features = false }
 

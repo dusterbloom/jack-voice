@@ -110,7 +110,9 @@ def main() -> int:
         req_id += 1
 
         readiness = status.get("readiness", {})
-        if isinstance(readiness, dict) and readiness.get("kokoro"):
+        if isinstance(readiness, dict) and readiness.get("pocket"):
+            tts_params = {"text": "Build finished.", "engine": "pocket", "voice": "alba"}
+        elif isinstance(readiness, dict) and readiness.get("kokoro"):
             tts_params = {"text": "Build finished.", "engine": "kokoro", "voice": "35"}
         else:
             tts_params = {"text": "Build finished.", "engine": "supertonic", "voice": "F1"}

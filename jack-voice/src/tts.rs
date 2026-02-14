@@ -1,12 +1,20 @@
 // Jack Desktop - Text-to-Speech
 // Supports multiple TTS engines:
+// - Pocket (fast English, pure Rust Candle)
 // - Supertonic (fast English)
 // - Kokoro (local multilingual)
 
+use pocket_tts::{ModelState as PocketModelState, TTSModel as PocketTtsModel};
 use supertonic::{TextToSpeech as SupertonicTts, VoiceStyleData};
 
 use crate::kokoro_tts::KokoroTts;
 use crate::models;
+
+const POCKET_MODEL_VARIANT: &str = "b6369a24";
+const POCKET_DEFAULT_VOICE: &str = "alba";
+const POCKET_VOICES: &[&str] = &[
+    "alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma",
+];
 
 /// Audio output from TTS
 #[derive(Clone, Debug)]
@@ -18,14 +26,114 @@ pub struct AudioOutput {
 /// TTS Engine type
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TtsEngine {
+    Pocket,
     Supertonic,
     Kokoro,
 }
 
 /// Internal TTS implementation
 enum TtsImpl {
+    Pocket(PocketTts),
     Supertonic(SupertonicTts),
     Kokoro(KokoroTts),
+}
+
+struct PocketTts {
+    model: PocketTtsModel,
+    voice_state: PocketModelState,
+    voice_id: String,
+}
+
+impl PocketTts {
+    fn new_with_voice(voice_id: &str) -> Result<Self, TtsError> {
+        let model = PocketTtsModel::load(POCKET_MODEL_VARIANT)
+            .map_err(|e| TtsError::InitError(format!("Pocket init failed: {}", e)))?;
+        let voice_state = load_pocket_voice_state(&model, voice_id)?;
+
+        Ok(Self {
+            model,
+            voice_state,
+            voice_id: voice_id.to_string(),
+        })
+    }
+
+    fn set_voice(&mut self, voice_id: &str) -> Result<(), TtsError> {
+        self.voice_state = load_pocket_voice_state(&self.model, voice_id)?;
+        self.voice_id = voice_id.to_string();
+        Ok(())
+    }
+
+    fn synthesize(&self, text: &str) -> Result<AudioOutput, TtsError> {
+        let audio = self
+            .model
+            .generate(text, &self.voice_state)
+            .map_err(|e| TtsError::SynthesisError(format!("Pocket synthesis failed: {}", e)))?;
+        let channels = audio
+            .to_vec2::<f32>()
+            .map_err(|e| TtsError::SynthesisError(format!("Pocket output decode failed: {}", e)))?;
+        let samples = channels.into_iter().next().unwrap_or_default();
+
+        Ok(AudioOutput {
+            samples,
+            sample_rate: self.sample_rate(),
+        })
+    }
+
+    fn synthesize_streaming<F>(&self, text: &str, on_chunk: &mut F) -> Result<u32, TtsError>
+    where
+        F: FnMut(&[f32], u32) -> bool,
+    {
+        for chunk in self.model.generate_stream(text, &self.voice_state) {
+            let chunk = chunk.map_err(|e| {
+                TtsError::SynthesisError(format!("Pocket streaming synthesis failed: {}", e))
+            })?;
+            let chunk = chunk.squeeze(0).map_err(|e| {
+                TtsError::SynthesisError(format!("Pocket streaming chunk decode failed: {}", e))
+            })?;
+            let channels = chunk.to_vec2::<f32>().map_err(|e| {
+                TtsError::SynthesisError(format!("Pocket streaming chunk decode failed: {}", e))
+            })?;
+            let samples = channels.into_iter().next().unwrap_or_default();
+
+            if !on_chunk(&samples, self.sample_rate()) {
+                break;
+            }
+        }
+
+        Ok(self.sample_rate())
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.model.sample_rate as u32
+    }
+}
+
+fn load_pocket_voice_state(
+    model: &PocketTtsModel,
+    voice_id: &str,
+) -> Result<PocketModelState, TtsError> {
+    if !POCKET_VOICES.contains(&voice_id) {
+        return Err(TtsError::ModelNotFound(format!(
+            "Unknown Pocket voice '{}'. Expected one of: {}",
+            voice_id,
+            POCKET_VOICES.join(", ")
+        )));
+    }
+
+    let prompt_hf_path = format!(
+        "hf://kyutai/pocket-tts-without-voice-cloning/embeddings/{}.safetensors",
+        voice_id
+    );
+    let prompt_path = pocket_tts::weights::download_if_necessary(&prompt_hf_path).map_err(|e| {
+        TtsError::ModelNotFound(format!(
+            "Pocket voice '{}' download failed: {}",
+            voice_id, e
+        ))
+    })?;
+
+    model
+        .get_voice_state_from_prompt_file(&prompt_path)
+        .map_err(|e| TtsError::InitError(format!("Pocket voice '{}' load failed: {}", voice_id, e)))
 }
 
 pub struct TextToSpeech {
@@ -36,17 +144,36 @@ pub struct TextToSpeech {
 }
 
 impl TextToSpeech {
-    /// Create a new TTS instance with default engine (Supertonic)
+    /// Create a new TTS instance with default engine (Pocket)
     pub fn new() -> Result<Self, TtsError> {
-        Self::with_engine(TtsEngine::Supertonic)
+        Self::with_engine(TtsEngine::Pocket)
     }
 
     /// Create TTS with specific engine
     pub fn with_engine(engine_type: TtsEngine) -> Result<Self, TtsError> {
         match engine_type {
+            TtsEngine::Pocket => Self::new_pocket(),
             TtsEngine::Supertonic => Self::new_supertonic(),
             TtsEngine::Kokoro => Self::new_kokoro(),
         }
+    }
+
+    /// Create Pocket TTS instance
+    fn new_pocket() -> Result<Self, TtsError> {
+        Self::new_pocket_with_voice(POCKET_DEFAULT_VOICE)
+    }
+
+    /// Create Pocket TTS instance with specific preset voice
+    pub fn new_pocket_with_voice(voice_id: &str) -> Result<Self, TtsError> {
+        let pocket = PocketTts::new_with_voice(voice_id)?;
+        let sample_rate = pocket.sample_rate();
+
+        Ok(Self {
+            engine: TtsImpl::Pocket(pocket),
+            speaker_id: voice_id.to_string(),
+            speed: 1.0,
+            sample_rate,
+        })
     }
 
     /// Create Supertonic TTS instance
@@ -129,6 +256,11 @@ impl TextToSpeech {
     /// Set the speaker voice by ID (e.g., "F1", "F2", "M1", "M2" for Supertonic, "0"-"10" for Kokoro)
     pub fn set_speaker(&mut self, speaker_id: &str) -> Result<(), TtsError> {
         match &mut self.engine {
+            TtsImpl::Pocket(pocket) => {
+                pocket.set_voice(speaker_id)?;
+                self.speaker_id = speaker_id.to_string();
+                Ok(())
+            }
             TtsImpl::Supertonic(tts) => {
                 let paths = models::get_supertonic_paths()?;
                 let voice_path = paths.voice_path(speaker_id);
@@ -175,17 +307,39 @@ impl TextToSpeech {
 
     /// Set the speaker voice by numeric ID (for backwards compatibility)
     pub fn set_speaker_id(&mut self, id: i32) {
-        // Map numeric IDs to voice IDs
-        let voice_id = match id {
-            0 => "F1",
-            1 => "F2",
-            2 => "M1",
-            3 => "M2",
-            _ => "F1",
+        let voice = match &self.engine {
+            TtsImpl::Pocket(_) => match id {
+                0 => "alba",
+                1 => "marius",
+                2 => "javert",
+                3 => "jean",
+                4 => "fantine",
+                5 => "cosette",
+                6 => "eponine",
+                7 => "azelma",
+                _ => POCKET_DEFAULT_VOICE,
+            },
+            TtsImpl::Supertonic(_) => match id {
+                0 => "F1",
+                1 => "F2",
+                2 => "M1",
+                3 => "M2",
+                _ => "F1",
+            },
+            TtsImpl::Kokoro(_) => match id {
+                0..=10 => {
+                    let voice_id = id.to_string();
+                    if let Err(e) = self.set_speaker(&voice_id) {
+                        log::warn!("Failed to set speaker {}: {}", voice_id, e);
+                    }
+                    return;
+                }
+                _ => "0",
+            },
         };
 
-        if let Err(e) = self.set_speaker(voice_id) {
-            log::warn!("Failed to set speaker {}: {}", voice_id, e);
+        if let Err(e) = self.set_speaker(voice) {
+            log::warn!("Failed to set speaker {}: {}", voice, e);
         }
     }
 
@@ -193,6 +347,9 @@ impl TextToSpeech {
     pub fn set_speed(&mut self, speed: f32) {
         self.speed = speed.clamp(0.25, 4.0);
         match &mut self.engine {
+            TtsImpl::Pocket(_) => {
+                // Pocket currently uses fixed decoding parameters.
+            }
             TtsImpl::Supertonic(tts) => tts.set_speed(self.speed),
             TtsImpl::Kokoro(_) => {
                 // Kokoro speed is set per-synthesis call, not as a persistent setting
@@ -211,6 +368,7 @@ impl TextToSpeech {
         }
 
         match &mut self.engine {
+            TtsImpl::Pocket(tts) => tts.synthesize(text),
             TtsImpl::Supertonic(tts) => {
                 let audio = tts
                     .synthesize(text)
@@ -248,9 +406,14 @@ impl TextToSpeech {
             return Ok(self.sample_rate);
         }
 
-        let audio = self.synthesize(text)?;
-        let _ = on_chunk(&audio.samples, audio.sample_rate);
-        Ok(audio.sample_rate)
+        match &mut self.engine {
+            TtsImpl::Pocket(tts) => tts.synthesize_streaming(text, &mut on_chunk),
+            _ => {
+                let audio = self.synthesize(text)?;
+                let _ = on_chunk(&audio.samples, audio.sample_rate);
+                Ok(audio.sample_rate)
+            }
+        }
     }
 
     /// Get the output sample rate
@@ -266,9 +429,56 @@ impl TextToSpeech {
     /// Get current engine type
     pub fn engine_type(&self) -> &str {
         match self.engine {
+            TtsImpl::Pocket(_) => "pocket",
             TtsImpl::Supertonic(_) => "supertonic",
             TtsImpl::Kokoro(_) => "kokoro",
         }
+    }
+
+    /// Get available voices for Pocket
+    pub fn available_pocket_voices() -> Vec<VoiceInfo> {
+        vec![
+            VoiceInfo {
+                id: 0,
+                name: "Alba".to_string(),
+                language: "en".to_string(),
+            },
+            VoiceInfo {
+                id: 1,
+                name: "Marius".to_string(),
+                language: "en".to_string(),
+            },
+            VoiceInfo {
+                id: 2,
+                name: "Javert".to_string(),
+                language: "en".to_string(),
+            },
+            VoiceInfo {
+                id: 3,
+                name: "Jean".to_string(),
+                language: "en".to_string(),
+            },
+            VoiceInfo {
+                id: 4,
+                name: "Fantine".to_string(),
+                language: "en".to_string(),
+            },
+            VoiceInfo {
+                id: 5,
+                name: "Cosette".to_string(),
+                language: "en".to_string(),
+            },
+            VoiceInfo {
+                id: 6,
+                name: "Eponine".to_string(),
+                language: "en".to_string(),
+            },
+            VoiceInfo {
+                id: 7,
+                name: "Azelma".to_string(),
+                language: "en".to_string(),
+            },
+        ]
     }
 
     /// Get available voices for Supertonic
@@ -311,8 +521,7 @@ impl TextToSpeech {
 
     /// Get available voices (legacy method, returns current engine's voices)
     pub fn available_voices() -> Vec<VoiceInfo> {
-        // Default to Supertonic for backwards compatibility
-        Self::available_supertonic_voices()
+        Self::available_pocket_voices()
     }
 }
 
