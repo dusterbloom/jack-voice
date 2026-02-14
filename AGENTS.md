@@ -5,7 +5,7 @@ This repository is a Rust workspace with two library crates:
 - `jack-voice/`: main voice pipeline components (audio, VAD, STT, TTS, turn detection, model management).
 - `supertonic/`: standalone Supertonic TTS implementation (core engine, phonemizer, voice style handling).
 
-Primary entry points are `jack-voice/src/lib.rs` and `supertonic/src/lib.rs`. Most code is organized as module-per-domain under each crate’s `src/`. Test fixtures (WAV samples) live in `jack-voice/src/fixtures/`. Build artifacts are generated in `target/` and should not be edited.
+Primary entry points are `jack-voice/src/lib.rs` and `supertonic/src/lib.rs`. Most code is organized as module-per-domain under each crate's `src/`. Test fixtures (WAV samples) live in `jack-voice/src/fixtures/`. Build artifacts are generated in `target/` and should not be edited.
 
 ## Build, Test, and Development Commands
 - `cargo check --workspace`: fast compile checks for all crates.
