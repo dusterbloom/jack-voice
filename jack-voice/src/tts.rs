@@ -5,6 +5,7 @@
 // - Kokoro (local multilingual)
 
 use pocket_tts::{ModelState as PocketModelState, TTSModel as PocketTtsModel};
+use std::path::Path;
 use supertonic::{TextToSpeech as SupertonicTts, VoiceStyleData};
 
 use crate::kokoro_tts::KokoroTts;
@@ -42,6 +43,13 @@ struct PocketTts {
     model: PocketTtsModel,
     voice_state: PocketModelState,
     voice_id: String,
+}
+
+#[derive(Debug)]
+enum PocketVoiceInput<'a> {
+    Preset(&'a str),
+    VoiceCloneWav(&'a Path),
+    PromptStateFile(&'a Path),
 }
 
 impl PocketTts {
@@ -112,28 +120,170 @@ fn load_pocket_voice_state(
     model: &PocketTtsModel,
     voice_id: &str,
 ) -> Result<PocketModelState, TtsError> {
-    if !POCKET_VOICES.contains(&voice_id) {
+    match classify_pocket_voice_input(voice_id)? {
+        PocketVoiceInput::Preset(preset_voice_id) => {
+            let prompt_hf_path = format!(
+                "hf://kyutai/pocket-tts-without-voice-cloning/embeddings/{}.safetensors",
+                preset_voice_id
+            );
+            let prompt_path =
+                pocket_tts::weights::download_if_necessary(&prompt_hf_path).map_err(|e| {
+                    TtsError::ModelNotFound(format!(
+                        "Pocket voice '{}' download failed: {}",
+                        preset_voice_id, e
+                    ))
+                })?;
+
+            model
+                .get_voice_state_from_prompt_file(&prompt_path)
+                .map_err(|e| {
+                    TtsError::InitError(format!(
+                        "Pocket voice '{}' load failed: {}",
+                        preset_voice_id, e
+                    ))
+                })
+        }
+        PocketVoiceInput::VoiceCloneWav(path) => model.get_voice_state(path).map_err(|e| {
+            TtsError::InitError(format!(
+                "Pocket voice cloning failed from '{}': {}",
+                path.display(),
+                e
+            ))
+        }),
+        PocketVoiceInput::PromptStateFile(path) => {
+            model.get_voice_state_from_prompt_file(path).map_err(|e| {
+                TtsError::InitError(format!(
+                    "Pocket prompt state load failed from '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })
+        }
+    }
+}
+
+fn classify_pocket_voice_input<'a>(voice_id: &'a str) -> Result<PocketVoiceInput<'a>, TtsError> {
+    let voice_id = voice_id.trim();
+    if voice_id.is_empty() {
+        return Err(TtsError::ModelNotFound(
+            "Pocket voice cannot be empty".to_string(),
+        ));
+    }
+
+    if POCKET_VOICES.contains(&voice_id) {
+        return Ok(PocketVoiceInput::Preset(voice_id));
+    }
+
+    let path = Path::new(voice_id);
+    if !path.exists() {
         return Err(TtsError::ModelNotFound(format!(
-            "Unknown Pocket voice '{}'. Expected one of: {}",
+            "Unknown Pocket voice '{}'. Expected one of: {} or an existing .wav/.safetensors file path",
             voice_id,
             POCKET_VOICES.join(", ")
         )));
     }
 
-    let prompt_hf_path = format!(
-        "hf://kyutai/pocket-tts-without-voice-cloning/embeddings/{}.safetensors",
-        voice_id
-    );
-    let prompt_path = pocket_tts::weights::download_if_necessary(&prompt_hf_path).map_err(|e| {
-        TtsError::ModelNotFound(format!(
-            "Pocket voice '{}' download failed: {}",
-            voice_id, e
-        ))
-    })?;
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
 
-    model
-        .get_voice_state_from_prompt_file(&prompt_path)
-        .map_err(|e| TtsError::InitError(format!("Pocket voice '{}' load failed: {}", voice_id, e)))
+    match extension.as_str() {
+        "wav" => Ok(PocketVoiceInput::VoiceCloneWav(path)),
+        "safetensors" => Ok(PocketVoiceInput::PromptStateFile(path)),
+        _ => Err(TtsError::ModelNotFound(format!(
+            "Unsupported Pocket voice file '{}'. Expected .wav for cloning or .safetensors for prompt state",
+            path.display()
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_pocket_voice_input, PocketVoiceInput, TtsError};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_file(ext: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join("jack-voice-tests");
+        fs::create_dir_all(&dir).expect("failed to create temp test dir");
+
+        let path = dir.join(format!("pocket-voice-{nanos}.{ext}"));
+        fs::write(&path, b"test").expect("failed to write temp test file");
+        path
+    }
+
+    #[test]
+    fn classify_pocket_voice_input_accepts_preset() {
+        match classify_pocket_voice_input("alba").expect("preset should be accepted") {
+            PocketVoiceInput::Preset("alba") => {}
+            _ => panic!("expected preset voice classification"),
+        }
+    }
+
+    #[test]
+    fn classify_pocket_voice_input_accepts_wav_file() {
+        let path = unique_temp_file("WAV");
+        let voice = path.to_string_lossy().to_string();
+
+        match classify_pocket_voice_input(&voice).expect("wav path should be accepted") {
+            PocketVoiceInput::VoiceCloneWav(classified_path) => {
+                assert_eq!(classified_path, path.as_path());
+            }
+            _ => panic!("expected wav voice clone path classification"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn classify_pocket_voice_input_accepts_prompt_state_file() {
+        let path = unique_temp_file("safetensors");
+        let voice = path.to_string_lossy().to_string();
+
+        match classify_pocket_voice_input(&voice).expect("prompt path should be accepted") {
+            PocketVoiceInput::PromptStateFile(classified_path) => {
+                assert_eq!(classified_path, path.as_path());
+            }
+            _ => panic!("expected prompt state file classification"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn classify_pocket_voice_input_rejects_unknown_voice() {
+        let err = classify_pocket_voice_input("not-a-real-voice")
+            .expect_err("unknown non-path voice should fail");
+        match err {
+            TtsError::ModelNotFound(message) => {
+                assert!(message.contains("Unknown Pocket voice"));
+            }
+            _ => panic!("expected model-not-found error"),
+        }
+    }
+
+    #[test]
+    fn classify_pocket_voice_input_rejects_unsupported_file_extension() {
+        let path = unique_temp_file("txt");
+        let voice = path.to_string_lossy().to_string();
+
+        let err = classify_pocket_voice_input(&voice).expect_err("txt file should be rejected");
+        match err {
+            TtsError::ModelNotFound(message) => {
+                assert!(message.contains("Unsupported Pocket voice file"));
+            }
+            _ => panic!("expected model-not-found error"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
 }
 
 pub struct TextToSpeech {
@@ -253,7 +403,9 @@ impl TextToSpeech {
         true // If we got here, the model loaded successfully
     }
 
-    /// Set the speaker voice by ID (e.g., "F1", "F2", "M1", "M2" for Supertonic, "0"-"10" for Kokoro)
+    /// Set speaker voice.
+    /// Pocket accepts preset names (`alba`, `marius`, etc.) or local `.wav`/`.safetensors` paths.
+    /// Supertonic accepts voice IDs like `F1`/`M2`; Kokoro accepts numeric IDs as strings.
     pub fn set_speaker(&mut self, speaker_id: &str) -> Result<(), TtsError> {
         match &mut self.engine {
             TtsImpl::Pocket(pocket) => {
