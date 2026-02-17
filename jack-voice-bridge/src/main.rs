@@ -18,8 +18,8 @@ use jack_voice::{
     VoiceActivityDetector,
 };
 use protocol::{
-    ErrorCode, RequestEnvelope, ResponseEnvelope, RpcError, RpcMethod, MAX_REQUEST_BYTES,
-    PROTOCOL_VERSION,
+    ErrorCode, EventEnvelope, RequestEnvelope, ResponseEnvelope, RpcError, RpcMethod,
+    MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -196,7 +196,7 @@ fn run() -> io::Result<()> {
                 false,
             )
         } else {
-            handle_line(&line, &mut state)
+            handle_line(&line, &mut state, &mut stdout)
         };
 
         write_response(&mut stdout, &response)?;
@@ -215,7 +215,11 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
-fn handle_line(line: &str, state: &mut BridgeState) -> (ResponseEnvelope, bool) {
+fn handle_line(
+    line: &str,
+    state: &mut BridgeState,
+    stdout: &mut dyn Write,
+) -> (ResponseEnvelope, bool) {
     let json_value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(err) => {
@@ -303,7 +307,7 @@ fn handle_line(line: &str, state: &mut BridgeState) -> (ResponseEnvelope, bool) 
     }
 
     let started = Instant::now();
-    let outcome = dispatch_request(state, method, request.params);
+    let outcome = dispatch_request(state, method, request.params, &request.id, stdout);
     if let Some(timeout_ms) = request.timeout_ms {
         let bounded_ms = timeout_ms.min(MAX_TIMEOUT_MS);
         if started.elapsed().as_millis() > bounded_ms as u128 {
@@ -333,6 +337,8 @@ fn dispatch_request(
     state: &mut BridgeState,
     method: RpcMethod,
     params: Value,
+    request_id: &str,
+    stdout: &mut dyn Write,
 ) -> Result<MethodOutcome, RpcError> {
     match method {
         RpcMethod::RuntimeHello => {
@@ -377,6 +383,14 @@ fn dispatch_request(
         RpcMethod::TtsSynthesize => {
             let params: TtsSynthesizeParams = parse_params(params)?;
             let result = handle_tts_synthesize(state, params)?;
+            Ok(MethodOutcome {
+                result,
+                should_shutdown: false,
+            })
+        }
+        RpcMethod::TtsStream => {
+            let params: TtsSynthesizeParams = parse_params(params)?;
+            let result = handle_tts_stream(state, params, request_id, stdout)?;
             Ok(MethodOutcome {
                 result,
                 should_shutdown: false,
@@ -427,7 +441,8 @@ fn handle_runtime_hello(params: RuntimeHelloParams) -> Result<Value, RpcError> {
             "supported_input_formats": ["pcm_s16le", "f32le"],
             "default_sample_rate_hz": DEFAULT_SAMPLE_RATE_HZ,
             "default_channels": DEFAULT_CHANNELS,
-            "tts_output_format": "f32le"
+            "tts_output_format": "f32le",
+            "tts_streaming_events": ["tts.start", "tts.chunk", "tts.end"]
         },
         "models": status
     }))
@@ -647,18 +662,7 @@ fn handle_tts_synthesize(
     state: &mut BridgeState,
     params: TtsSynthesizeParams,
 ) -> Result<Value, RpcError> {
-    let output_format = params
-        .format
-        .as_deref()
-        .unwrap_or("f32le")
-        .to_ascii_lowercase();
-
-    if output_format != "f32le" {
-        return Err(RpcError::new(
-            ErrorCode::UnsupportedAudioFormat,
-            format!("Unsupported tts output format '{}'", output_format),
-        ));
-    }
+    validate_tts_output_format(params.format.as_deref())?;
 
     let requested_engine = parse_tts_engine(params.engine.as_deref())?;
     let engine_used = ensure_tts_instance(state, requested_engine)?;
@@ -677,11 +681,7 @@ fn handle_tts_synthesize(
     }
 
     let audio = tts.synthesize(params.text.trim()).map_err(map_tts_error)?;
-    let duration_ms = if audio.sample_rate == 0 {
-        0
-    } else {
-        (audio.samples.len() as u64 * 1000) / audio.sample_rate as u64
-    };
+    let duration_ms = duration_ms_for_samples(audio.samples.len(), audio.sample_rate);
 
     Ok(json!({
         "audio_b64": encode_f32le_to_base64(&audio.samples),
@@ -693,6 +693,160 @@ fn handle_tts_synthesize(
         "engine": engine_used.as_str(),
         "voice": tts.current_speaker()
     }))
+}
+
+fn handle_tts_stream(
+    state: &mut BridgeState,
+    params: TtsSynthesizeParams,
+    request_id: &str,
+    stdout: &mut dyn Write,
+) -> Result<Value, RpcError> {
+    validate_tts_output_format(params.format.as_deref())?;
+
+    let requested_engine = parse_tts_engine(params.engine.as_deref())?;
+    let engine_used = ensure_tts_instance(state, requested_engine)?;
+
+    let tts = state
+        .tts
+        .as_mut()
+        .ok_or_else(|| RpcError::new(ErrorCode::InternalError, "TTS state unavailable"))?;
+
+    if let Some(voice) = normalize_optional_string(params.voice) {
+        tts.set_speaker(&voice).map_err(map_tts_error)?;
+    }
+
+    if let Some(speed) = params.speed {
+        tts.set_speed(speed);
+    }
+
+    let voice_used = tts.current_speaker().to_string();
+
+    write_event(
+        stdout,
+        &EventEnvelope::new(
+            request_id,
+            "tts.start",
+            json!({
+                "engine": engine_used.as_str(),
+                "voice": voice_used.as_str(),
+                "format": "f32le",
+                "channels": DEFAULT_CHANNELS
+            }),
+        ),
+    )
+    .map_err(|err| {
+        RpcError::new(
+            ErrorCode::InternalError,
+            format!("Failed to emit tts.start event: {err}"),
+        )
+    })?;
+
+    let mut chunk_index: u64 = 0;
+    let mut sample_count: usize = 0;
+    let mut observed_sample_rate: Option<u32> = None;
+    let mut emit_error: Option<io::Error> = None;
+
+    let stream_sample_rate = tts
+        .synthesize_streaming(params.text.trim(), |samples, sample_rate| {
+            observed_sample_rate = Some(sample_rate);
+            if emit_error.is_some() {
+                return false;
+            }
+
+            let event = EventEnvelope::new(
+                request_id,
+                "tts.chunk",
+                json!({
+                    "index": chunk_index,
+                    "audio_b64": encode_f32le_to_base64(samples),
+                    "format": "f32le",
+                    "sample_rate_hz": sample_rate,
+                    "channels": DEFAULT_CHANNELS,
+                    "sample_count": samples.len(),
+                    "duration_ms": duration_ms_for_samples(samples.len(), sample_rate),
+                    "engine": engine_used.as_str(),
+                    "voice": voice_used.as_str()
+                }),
+            );
+
+            if let Err(err) = write_event(stdout, &event) {
+                emit_error = Some(err);
+                return false;
+            }
+
+            chunk_index += 1;
+            sample_count += samples.len();
+            true
+        })
+        .map_err(map_tts_error)?;
+
+    if let Some(err) = emit_error {
+        return Err(RpcError::new(
+            ErrorCode::InternalError,
+            format!("Failed to emit tts.chunk event: {err}"),
+        ));
+    }
+
+    let sample_rate = observed_sample_rate.unwrap_or(stream_sample_rate);
+    let duration_ms = duration_ms_for_samples(sample_count, sample_rate);
+
+    write_event(
+        stdout,
+        &EventEnvelope::new(
+            request_id,
+            "tts.end",
+            json!({
+                "engine": engine_used.as_str(),
+                "voice": voice_used.as_str(),
+                "format": "f32le",
+                "sample_rate_hz": sample_rate,
+                "channels": DEFAULT_CHANNELS,
+                "sample_count": sample_count,
+                "duration_ms": duration_ms,
+                "chunk_count": chunk_index
+            }),
+        ),
+    )
+    .map_err(|err| {
+        RpcError::new(
+            ErrorCode::InternalError,
+            format!("Failed to emit tts.end event: {err}"),
+        )
+    })?;
+
+    Ok(json!({
+        "streamed": true,
+        "event": "tts.chunk",
+        "engine": engine_used.as_str(),
+        "voice": voice_used.as_str(),
+        "format": "f32le",
+        "sample_rate_hz": sample_rate,
+        "channels": DEFAULT_CHANNELS,
+        "sample_count": sample_count,
+        "duration_ms": duration_ms,
+        "chunk_count": chunk_index,
+        "native_streaming": engine_used == CachedTtsEngine::Pocket
+    }))
+}
+
+fn validate_tts_output_format(format: Option<&str>) -> Result<(), RpcError> {
+    let output_format = format.unwrap_or("f32le").trim().to_ascii_lowercase();
+    if output_format == "f32le" {
+        Ok(())
+    } else {
+        Err(RpcError::new(
+            ErrorCode::UnsupportedAudioFormat,
+            format!("Unsupported tts output format '{}'", output_format),
+        ))
+    }
+}
+
+fn duration_ms_for_samples(sample_count: usize, sample_rate: u32) -> u64 {
+    if sample_rate == 0 {
+        0
+    } else {
+        (sample_count as u64 * 1000) / sample_rate as u64
+    }
 }
 
 fn ensure_tts_instance(
@@ -848,6 +1002,13 @@ fn extract_request_id(line: &str) -> Option<String> {
 
 fn write_response(stdout: &mut dyn Write, response: &ResponseEnvelope) -> io::Result<()> {
     let encoded = serde_json::to_string(response)
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+    writeln!(stdout, "{encoded}")?;
+    stdout.flush()
+}
+
+fn write_event(stdout: &mut dyn Write, event: &EventEnvelope) -> io::Result<()> {
+    let encoded = serde_json::to_string(event)
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
     writeln!(stdout, "{encoded}")?;
     stdout.flush()

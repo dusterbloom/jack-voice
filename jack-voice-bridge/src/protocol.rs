@@ -56,6 +56,26 @@ impl ResponseEnvelope {
 }
 
 #[derive(Debug, Serialize)]
+pub struct EventEnvelope {
+    #[serde(rename = "type")]
+    pub message_type: &'static str,
+    pub id: String,
+    pub event: String,
+    pub data: Value,
+}
+
+impl EventEnvelope {
+    pub fn new(id: impl Into<String>, event: impl Into<String>, data: Value) -> Self {
+        Self {
+            message_type: "event",
+            id: id.into(),
+            event: event.into(),
+            data,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub code: &'static str,
     pub message: String,
@@ -122,6 +142,7 @@ pub enum RpcMethod {
     VadDetect,
     SttTranscribe,
     TtsSynthesize,
+    TtsStream,
     RuntimeShutdown,
 }
 
@@ -134,6 +155,7 @@ impl RpcMethod {
             "vad.detect",
             "stt.transcribe",
             "tts.synthesize",
+            "tts.stream",
             "runtime.shutdown",
         ]
     }
@@ -150,6 +172,7 @@ impl FromStr for RpcMethod {
             "vad.detect" => Ok(Self::VadDetect),
             "stt.transcribe" => Ok(Self::SttTranscribe),
             "tts.synthesize" => Ok(Self::TtsSynthesize),
+            "tts.stream" => Ok(Self::TtsStream),
             "runtime.shutdown" => Ok(Self::RuntimeShutdown),
             _ => Err(RpcError::new(
                 ErrorCode::MethodNotFound,
@@ -173,6 +196,7 @@ mod tests {
             "vad.detect",
             "stt.transcribe",
             "tts.synthesize",
+            "tts.stream",
             "runtime.shutdown",
         ];
 

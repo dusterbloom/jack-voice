@@ -10,6 +10,7 @@ import argparse
 import base64
 import json
 import os
+import platform
 import subprocess
 import sys
 from typing import Any, Dict
@@ -43,6 +44,44 @@ def rpc(stdin, stdout, req_id: int, method: str, params: Dict[str, Any]) -> Dict
     return result
 
 
+def rpc_tts_stream(stdin, stdout, req_id: int, params: Dict[str, Any]) -> tuple[Dict[str, Any], list[Dict[str, Any]]]:
+    message = {
+        "type": "request",
+        "id": str(req_id),
+        "method": "tts.stream",
+        "params": params,
+    }
+    stdin.write(json.dumps(message) + "\n")
+    stdin.flush()
+
+    events: list[Dict[str, Any]] = []
+    while True:
+        line = stdout.readline()
+        if not line:
+            raise RuntimeError("Bridge closed while waiting for tts.stream")
+
+        message = json.loads(line)
+        message_type = message.get("type")
+
+        if message_type == "event":
+            if message.get("id") != str(req_id):
+                raise RuntimeError(f"Mismatched event id for tts.stream: {message}")
+            events.append(message)
+            continue
+
+        if message_type != "response":
+            raise RuntimeError(f"Unexpected message type for tts.stream: {message}")
+        if message.get("id") != str(req_id):
+            raise RuntimeError(f"Mismatched response id for tts.stream: {message}")
+        if not message.get("ok", False):
+            raise RuntimeError(f"tts.stream failed: {message.get('error')}")
+
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"tts.stream returned non-object result: {result}")
+        return result, events
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -54,8 +93,16 @@ def main() -> int:
 
     env = os.environ.copy()
     bridge_dir = os.path.abspath(os.path.join(os.path.dirname(args.bridge), "."))
-    ld_current = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = f"{bridge_dir}:{ld_current}" if ld_current else bridge_dir
+    if os.name == "nt":
+        loader_key = "PATH"
+    elif platform.system() == "Darwin":
+        loader_key = "DYLD_LIBRARY_PATH"
+    else:
+        loader_key = "LD_LIBRARY_PATH"
+    current = env.get(loader_key, "")
+    env[loader_key] = (
+        f"{bridge_dir}{os.pathsep}{current}" if current else bridge_dir
+    )
 
     proc = subprocess.Popen(
         [args.bridge],
@@ -120,6 +167,11 @@ def main() -> int:
         tts = rpc(proc.stdin, proc.stdout, req_id, "tts.synthesize", tts_params)
         req_id += 1
 
+        stream_params = dict(tts_params)
+        stream_params["text"] = "Build finished with streaming."
+        tts_stream, tts_stream_events = rpc_tts_stream(proc.stdin, proc.stdout, req_id, stream_params)
+        req_id += 1
+
         _ = rpc(proc.stdin, proc.stdout, req_id, "runtime.shutdown", {})
 
         print("protocol_version:", hello.get("protocol_version"))
@@ -132,6 +184,23 @@ def main() -> int:
             {k: tts.get(k) for k in ("engine", "voice", "sample_rate_hz", "sample_count", "duration_ms")},
         )
         print("tts_audio_b64_len:", len(tts.get("audio_b64", "")))
+        event_names = [evt.get("event") for evt in tts_stream_events]
+        print("tts_stream_events:", event_names)
+        print(
+            "tts_stream:",
+            {
+                k: tts_stream.get(k)
+                for k in (
+                    "engine",
+                    "voice",
+                    "native_streaming",
+                    "sample_rate_hz",
+                    "sample_count",
+                    "duration_ms",
+                    "chunk_count",
+                )
+            },
+        )
         return 0
     finally:
         if proc.poll() is None:

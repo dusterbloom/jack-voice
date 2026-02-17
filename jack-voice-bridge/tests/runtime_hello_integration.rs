@@ -71,6 +71,33 @@ impl BridgeHarness {
         response
     }
 
+    fn rpc_err(&mut self, id: &str, method: &str, params: Value) -> Value {
+        let response = self.request(json!({
+            "type": "request",
+            "id": id,
+            "method": method,
+            "params": params
+        }));
+
+        assert_eq!(
+            response.get("type").and_then(Value::as_str),
+            Some("response"),
+            "unexpected response type: {response}"
+        );
+        assert_eq!(
+            response.get("id").and_then(Value::as_str),
+            Some(id),
+            "unexpected response id: {response}"
+        );
+        assert_eq!(
+            response.get("ok").and_then(Value::as_bool),
+            Some(false),
+            "expected error response: {response}"
+        );
+
+        response
+    }
+
     fn shutdown(mut self) {
         let _ = self.request(json!({
             "type": "request",
@@ -131,6 +158,13 @@ fn runtime_hello_reports_pocket_readiness() {
         readiness["pocket"].is_boolean(),
         "models.readiness.pocket should be a boolean"
     );
+    let methods = response["result"]["methods"]
+        .as_array()
+        .expect("runtime.hello should include methods array");
+    assert!(
+        methods.iter().any(|v| v.as_str() == Some("tts.stream")),
+        "runtime.hello methods should advertise tts.stream: {methods:?}"
+    );
 
     bridge.shutdown();
 }
@@ -158,6 +192,31 @@ fn models_status_reports_pocket_readiness() {
     assert!(
         missing.iter().all(Value::is_string),
         "models.status missing entries should all be strings: {missing:?}"
+    );
+
+    bridge.shutdown();
+}
+
+#[test]
+fn tts_stream_rejects_unsupported_format() {
+    let mut bridge = BridgeHarness::spawn();
+
+    let response = bridge.rpc_err(
+        "1",
+        "tts.stream",
+        json!({
+            "text": "hello",
+            "format": "wav"
+        }),
+    );
+
+    let error = response["error"]
+        .as_object()
+        .expect("tts.stream error response should include error object");
+    assert_eq!(
+        error.get("code").and_then(Value::as_str),
+        Some("UNSUPPORTED_AUDIO_FORMAT"),
+        "unexpected tts.stream error: {response}"
     );
 
     bridge.shutdown();
