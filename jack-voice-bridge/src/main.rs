@@ -49,6 +49,8 @@ enum CachedTtsEngine {
     Pocket,
     Supertonic,
     Kokoro,
+    Qwen,
+    QwenLarge,
 }
 
 impl CachedTtsEngine {
@@ -57,6 +59,8 @@ impl CachedTtsEngine {
             Self::Pocket => "pocket",
             Self::Supertonic => "supertonic",
             Self::Kokoro => "kokoro",
+            Self::Qwen => "qwen",
+            Self::QwenLarge => "qwen-large",
         }
     }
 
@@ -65,6 +69,8 @@ impl CachedTtsEngine {
             Self::Pocket => TtsEngine::Pocket,
             Self::Supertonic => TtsEngine::Supertonic,
             Self::Kokoro => TtsEngine::Kokoro,
+            Self::Qwen => TtsEngine::Qwen,
+            Self::QwenLarge => TtsEngine::QwenLarge,
         }
     }
 }
@@ -75,6 +81,8 @@ enum RequestedTtsEngine {
     Pocket,
     Supertonic,
     Kokoro,
+    Qwen,
+    QwenLarge,
 }
 
 struct MethodOutcome {
@@ -825,7 +833,7 @@ fn handle_tts_stream(
         "sample_count": sample_count,
         "duration_ms": duration_ms,
         "chunk_count": chunk_index,
-        "native_streaming": engine_used == CachedTtsEngine::Pocket
+        "native_streaming": matches!(engine_used, CachedTtsEngine::Pocket | CachedTtsEngine::Qwen | CachedTtsEngine::QwenLarge)
     }))
 }
 
@@ -857,6 +865,14 @@ fn ensure_tts_instance(
         RequestedTtsEngine::Auto => {
             if let Some(current) = state.tts_engine {
                 return Ok(current);
+            }
+
+            if TextToSpeech::can_run_qwen() {
+                if let Ok(tts) = TextToSpeech::with_engine(TtsEngine::Qwen) {
+                    state.tts = Some(tts);
+                    state.tts_engine = Some(CachedTtsEngine::Qwen);
+                    return Ok(CachedTtsEngine::Qwen);
+                }
             }
 
             match TextToSpeech::with_engine(TtsEngine::Pocket) {
@@ -894,6 +910,8 @@ fn ensure_tts_instance(
         RequestedTtsEngine::Pocket => set_tts_engine(state, CachedTtsEngine::Pocket),
         RequestedTtsEngine::Supertonic => set_tts_engine(state, CachedTtsEngine::Supertonic),
         RequestedTtsEngine::Kokoro => set_tts_engine(state, CachedTtsEngine::Kokoro),
+        RequestedTtsEngine::Qwen => set_tts_engine(state, CachedTtsEngine::Qwen),
+        RequestedTtsEngine::QwenLarge => set_tts_engine(state, CachedTtsEngine::QwenLarge),
     }
 }
 
@@ -932,6 +950,8 @@ fn parse_tts_engine(engine: Option<&str>) -> Result<RequestedTtsEngine, RpcError
         "pocket" => Ok(RequestedTtsEngine::Pocket),
         "supertonic" => Ok(RequestedTtsEngine::Supertonic),
         "kokoro" => Ok(RequestedTtsEngine::Kokoro),
+        "qwen" => Ok(RequestedTtsEngine::Qwen),
+        "qwen-large" | "qwenlarge" => Ok(RequestedTtsEngine::QwenLarge),
         other => Err(RpcError::new(
             ErrorCode::InvalidParams,
             format!("Unsupported tts engine '{other}'"),
