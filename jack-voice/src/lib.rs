@@ -1,6 +1,6 @@
 //! Jack Voice - Production-quality voice pipeline
 //!
-//! Provides VAD (Silero), STT (Whisper/Moonshine/Parakeet), TTS (Pocket/Supertonic/Kokoro),
+//! Provides VAD (Silero), STT (Whisper/Moonshine/Parakeet), TTS (Pocket/Supertonic/Kokoro/Qwen),
 //! turn detection (SmartTurn), audio capture/playback, and voice calibration.
 //!
 //! Extracted from jack-desktop as a standalone, framework-agnostic crate.
@@ -13,6 +13,7 @@ pub mod kokoro_tts;
 pub mod models;
 pub mod parakeet_stt;
 pub mod pipeline;
+pub mod qwen_tts;
 pub mod speaker;
 pub mod stt;
 pub mod tts;
@@ -26,6 +27,7 @@ pub use audio_quality::{AudioQuality, AudioQualityGate};
 pub use calibration::{CalibrationResults, CalibrationSession, VoiceConfig};
 pub use models::{LogProgress, ModelError, ModelProgressCallback, NoopProgress};
 pub use pipeline::{VoiceEvent, VoiceEventSink, VoicePipeline, VoicePipelineConfig};
+pub use qwen_tts::{QwenModelSize, TimingInfo, VoiceCloneRef, QWEN_LITE_VOICES};
 pub use speaker::{SpeakerProfile, SttMode, TurnMetrics};
 pub use stt::{SpeechToText, SttError, TranscriptionResult};
 pub use tts::AudioOutput;

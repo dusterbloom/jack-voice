@@ -632,6 +632,92 @@ pub fn get_kokoro_paths() -> Result<KokoroModelPaths, ModelError> {
 }
 
 // ============================================
+// Qwen3-TTS Model Paths and Functions
+// ============================================
+
+pub const QWEN_LITE_MODEL_ID: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
+pub const QWEN_LARGE_MODEL_ID: &str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base";
+pub const QWEN_SPEECH_TOKENIZER_ID: &str = "Qwen/Qwen3-TTS-Tokenizer-12Hz";
+pub const QWEN_TEXT_TOKENIZER_ID: &str = "Qwen/Qwen2-0.5B";
+pub const QWEN_LITE_SIZE_MB: u64 = 1800;
+pub const QWEN_LARGE_SIZE_MB: u64 = 3900;
+
+pub fn qwen_model_dir(size: crate::qwen_tts::QwenModelSize) -> PathBuf {
+    let subdir = match size {
+        crate::qwen_tts::QwenModelSize::Lite => "qwen-lite",
+        crate::qwen_tts::QwenModelSize::Large => "qwen-large",
+    };
+    get_models_dir()
+        .expect("models dir")
+        .join("qwen")
+        .join(subdir)
+}
+
+pub fn qwen_model_ready(size: crate::qwen_tts::QwenModelSize) -> bool {
+    let model_dir = qwen_model_dir(size);
+    model_dir.join("model.safetensors").exists()
+        && model_dir.join("config.json").exists()
+        && model_dir.join("speech_tokenizer/model.safetensors").exists()
+}
+
+pub async fn ensure_qwen_model(
+    size: crate::qwen_tts::QwenModelSize,
+    progress: &dyn ModelProgressCallback,
+) -> Result<(), ModelError> {
+    if qwen_model_ready(size) {
+        log::info!("[MODELS] Qwen {:?} model already ready", size);
+        return Ok(());
+    }
+
+    let (model_id, size_mb, model_name) = match size {
+        crate::qwen_tts::QwenModelSize::Lite => {
+            (QWEN_LITE_MODEL_ID, QWEN_LITE_SIZE_MB, "Qwen Lite (0.6B)")
+        }
+        crate::qwen_tts::QwenModelSize::Large => {
+            (QWEN_LARGE_MODEL_ID, QWEN_LARGE_SIZE_MB, "Qwen Large (1.7B)")
+        }
+    };
+
+    progress.on_download_start(model_name, size_mb);
+
+    let model_id_owned = model_id.to_string();
+    let target_dir = qwen_model_dir(size);
+
+    tokio::task::spawn_blocking(move || -> Result<(), ModelError> {
+        use qwen3_tts::hub::ModelPaths;
+        
+        log::info!("[MODELS] Downloading Qwen model via hf-hub: {}", model_id_owned);
+        
+        let paths = ModelPaths::download(Some(&model_id_owned))
+            .map_err(|e| ModelError::DownloadError(format!("hf-hub download failed: {}", e)))?;
+        
+        fs::create_dir_all(&target_dir)
+            .map_err(|e| ModelError::IoError(e.to_string()))?;
+        fs::create_dir_all(target_dir.join("speech_tokenizer"))
+            .map_err(|e| ModelError::IoError(e.to_string()))?;
+        
+        fn copy_file(src: &std::path::Path, dst: &std::path::Path) -> Result<(), ModelError> {
+            fs::copy(src, dst)
+                .map_err(|e| ModelError::IoError(format!("Failed to copy {:?} to {:?}: {}", src, dst, e)))?;
+            Ok(())
+        }
+        
+        copy_file(&paths.model_weights, &target_dir.join("model.safetensors"))?;
+        copy_file(&paths.config, &target_dir.join("config.json"))?;
+        copy_file(&paths.decoder_weights, &target_dir.join("speech_tokenizer/model.safetensors"))?;
+        copy_file(&paths.tokenizer, &target_dir.join("tokenizer.json"))?;
+        
+        log::info!("[MODELS] Qwen model download complete at {:?}", target_dir);
+        Ok(())
+    })
+    .await
+    .map_err(|e| ModelError::DownloadError(format!("Task join error: {}", e)))??;
+
+    progress.on_download_complete(model_name);
+    Ok(())
+}
+
+// ============================================
 // Model download functions (Tauri-free)
 // ============================================
 
@@ -1021,4 +1107,47 @@ pub enum ModelError {
     DownloadError(String),
     #[error("Model not found: {0}")]
     ModelNotFound(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qwen_model_dir_lite_path() {
+        let dir = qwen_model_dir(crate::qwen_tts::QwenModelSize::Lite);
+        let path_str = dir.to_string_lossy();
+        assert!(path_str.contains("qwen"), "Path should contain 'qwen': {}", path_str);
+        assert!(path_str.contains("lite"), "Path should contain 'lite': {}", path_str);
+    }
+
+    #[test]
+    fn qwen_model_dir_large_path() {
+        let dir = qwen_model_dir(crate::qwen_tts::QwenModelSize::Large);
+        let path_str = dir.to_string_lossy();
+        assert!(path_str.contains("qwen"), "Path should contain 'qwen': {}", path_str);
+        assert!(path_str.contains("large"), "Path should contain 'large': {}", path_str);
+    }
+
+    #[test]
+    fn qwen_model_ready_false_when_missing() {
+        assert!(
+            !qwen_model_ready(crate::qwen_tts::QwenModelSize::Lite),
+            "Lite model should not be ready without download"
+        );
+        assert!(
+            !qwen_model_ready(crate::qwen_tts::QwenModelSize::Large),
+            "Large model should not be ready without download"
+        );
+    }
+
+    #[test]
+    fn qwen_constants_are_valid() {
+        assert!(!QWEN_LITE_MODEL_ID.is_empty());
+        assert!(!QWEN_LARGE_MODEL_ID.is_empty());
+        assert!(!QWEN_SPEECH_TOKENIZER_ID.is_empty());
+        assert!(!QWEN_TEXT_TOKENIZER_ID.is_empty());
+        assert!(QWEN_LITE_SIZE_MB > 0);
+        assert!(QWEN_LARGE_SIZE_MB > QWEN_LITE_SIZE_MB);
+    }
 }

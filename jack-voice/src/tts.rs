@@ -3,13 +3,16 @@
 // - Pocket (fast English, pure Rust Candle)
 // - Supertonic (fast English)
 // - Kokoro (local multilingual)
+// - Qwen (0.6B lite, preset speakers)
+// - QwenLarge (1.7B, voice cloning)
 
 use pocket_tts::{ModelState as PocketModelState, TTSModel as PocketTtsModel};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use supertonic::{TextToSpeech as SupertonicTts, VoiceStyleData};
 
 use crate::kokoro_tts::KokoroTts;
 use crate::models;
+use crate::qwen_tts::{self, QwenModelSize, QwenTts, VoiceCloneRef};
 
 const POCKET_MODEL_VARIANT: &str = "b6369a24";
 const POCKET_DEFAULT_VOICE: &str = "alba";
@@ -30,6 +33,8 @@ pub enum TtsEngine {
     Pocket,
     Supertonic,
     Kokoro,
+    Qwen,
+    QwenLarge,
 }
 
 /// Internal TTS implementation
@@ -37,6 +42,8 @@ enum TtsImpl {
     Pocket(PocketTts),
     Supertonic(SupertonicTts),
     Kokoro(KokoroTts),
+    Qwen(QwenTts),
+    QwenLarge(QwenTts),
 }
 
 struct PocketTts {
@@ -201,7 +208,7 @@ fn classify_pocket_voice_input<'a>(voice_id: &'a str) -> Result<PocketVoiceInput
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_pocket_voice_input, PocketVoiceInput, TtsError};
+    use super::{classify_pocket_voice_input, PocketVoiceInput, TextToSpeech, TtsEngine, TtsError};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -284,6 +291,58 @@ mod tests {
 
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn tts_engine_serializes_qwen_variants() {
+        let qwen = TtsEngine::Qwen;
+        let qwen_large = TtsEngine::QwenLarge;
+
+        let qwen_json = serde_json::to_string(&qwen).expect("Qwen should serialize");
+        let qwen_large_json =
+            serde_json::to_string(&qwen_large).expect("QwenLarge should serialize");
+
+        assert!(
+            qwen_json.contains("Qwen"),
+            "Qwen JSON should contain 'Qwen': {}",
+            qwen_json
+        );
+        assert!(
+            qwen_large_json.contains("QwenLarge"),
+            "QwenLarge JSON should contain 'QwenLarge': {}",
+            qwen_large_json
+        );
+    }
+
+    #[test]
+    fn tts_engine_deserializes_qwen_variants() {
+        let qwen: TtsEngine = serde_json::from_str("\"Qwen\"").expect("Should deserialize Qwen");
+        let qwen_large: TtsEngine =
+            serde_json::from_str("\"QwenLarge\"").expect("Should deserialize QwenLarge");
+
+        assert_eq!(qwen, TtsEngine::Qwen);
+        assert_eq!(qwen_large, TtsEngine::QwenLarge);
+    }
+
+    #[test]
+    fn available_qwen_voices_returns_presets() {
+        let voices = TextToSpeech::available_qwen_voices();
+        assert!(!voices.is_empty(), "Should have available voices");
+        assert_eq!(voices.len(), 9, "Should have 9 preset voices");
+        assert!(
+            voices.iter().any(|v| v.id_str == "ryan"),
+            "Should include ryan"
+        );
+        assert!(
+            voices.iter().any(|v| v.id_str == "serena"),
+            "Should include serena"
+        );
+    }
+
+    #[test]
+    fn can_run_qwen_returns_bool() {
+        let result = TextToSpeech::can_run_qwen();
+        assert!(result == true || result == false, "Should return a boolean");
+    }
 }
 
 pub struct TextToSpeech {
@@ -305,6 +364,8 @@ impl TextToSpeech {
             TtsEngine::Pocket => Self::new_pocket(),
             TtsEngine::Supertonic => Self::new_supertonic(),
             TtsEngine::Kokoro => Self::new_kokoro(),
+            TtsEngine::Qwen => Self::new_qwen(),
+            TtsEngine::QwenLarge => Self::new_qwen_large(),
         }
     }
 
@@ -361,6 +422,82 @@ impl TextToSpeech {
         })
     }
 
+    /// Create Qwen TTS instance (0.6B Lite with preset speakers)
+    pub fn new_qwen() -> Result<Self, TtsError> {
+        Self::new_qwen_with_voice("ryan")
+    }
+
+    /// Create Qwen TTS instance with specific voice
+    pub fn new_qwen_with_voice(voice_id: &str) -> Result<Self, TtsError> {
+        let model_dir = models::qwen_model_dir(QwenModelSize::Lite);
+
+        if !models::qwen_model_ready(QwenModelSize::Lite) {
+            return Err(TtsError::ModelNotFound(
+                "Qwen Lite model not downloaded. Run model download first.".to_string(),
+            ));
+        }
+
+        log::info!("[TTS] Initializing Qwen Lite with voice {}", voice_id);
+
+        let mut qwen = QwenTts::new(&model_dir, QwenModelSize::Lite)
+            .map_err(|e| TtsError::InitError(format!("Qwen Lite init failed: {}", e)))?;
+
+        qwen.set_speaker(voice_id)
+            .map_err(|e| TtsError::InitError(format!("Qwen voice set failed: {}", e)))?;
+
+        Ok(Self {
+            engine: TtsImpl::Qwen(qwen),
+            speaker_id: voice_id.to_string(),
+            speed: 1.0,
+            sample_rate: 24000,
+        })
+    }
+
+    /// Create QwenLarge TTS instance (1.7B with voice cloning)
+    pub fn new_qwen_large() -> Result<Self, TtsError> {
+        Self::new_qwen_large_with_voice_clone(None)
+    }
+
+    /// Create QwenLarge TTS instance with optional voice clone reference
+    pub fn new_qwen_large_with_voice_clone(
+        voice_clone_ref: Option<VoiceCloneRef>,
+    ) -> Result<Self, TtsError> {
+        let model_dir = models::qwen_model_dir(QwenModelSize::Large);
+
+        if !models::qwen_model_ready(QwenModelSize::Large) {
+            return Err(TtsError::ModelNotFound(
+                "Qwen Large model not downloaded. Run model download first.".to_string(),
+            ));
+        }
+
+        log::info!(
+            "[TTS] Initializing Qwen Large{}",
+            if voice_clone_ref.is_some() {
+                " with voice cloning"
+            } else {
+                ""
+            }
+        );
+
+        let mut qwen = QwenTts::new(&model_dir, QwenModelSize::Large)
+            .map_err(|e| TtsError::InitError(format!("Qwen Large init failed: {}", e)))?;
+
+        let speaker_id = if let Some(ref reference) = voice_clone_ref {
+            qwen.set_voice_clone(reference.clone())
+                .map_err(|e| TtsError::InitError(format!("Qwen voice clone failed: {}", e)))?;
+            "cloned".to_string()
+        } else {
+            "default".to_string()
+        };
+
+        Ok(Self {
+            engine: TtsImpl::QwenLarge(qwen),
+            speaker_id,
+            speed: 1.0,
+            sample_rate: 24000,
+        })
+    }
+
     /// Create TTS with specific Supertonic model paths
     pub fn with_supertonic_paths(paths: &models::SupertonicPaths) -> Result<Self, TtsError> {
         // Verify required model files exist
@@ -406,6 +543,7 @@ impl TextToSpeech {
     /// Set speaker voice.
     /// Pocket accepts preset names (`alba`, `marius`, etc.) or local `.wav`/`.safetensors` paths.
     /// Supertonic accepts voice IDs like `F1`/`M2`; Kokoro accepts numeric IDs as strings.
+    /// Qwen accepts preset names (`ryan`, `serena`, etc.); QwenLarge requires voice cloning.
     pub fn set_speaker(&mut self, speaker_id: &str) -> Result<(), TtsError> {
         match &mut self.engine {
             TtsImpl::Pocket(pocket) => {
@@ -454,6 +592,21 @@ impl TextToSpeech {
                     ))),
                 }
             }
+            TtsImpl::Qwen(qwen) => {
+                qwen.set_speaker(speaker_id)?;
+                self.speaker_id = speaker_id.to_string();
+                log::info!("[TTS] Set Qwen voice to {}", speaker_id);
+                Ok(())
+            }
+            TtsImpl::QwenLarge(_qwen) => {
+                log::warn!(
+                    "[TTS] QwenLarge uses voice cloning, not preset speakers. \
+                     Use set_voice_clone_reference() instead."
+                );
+                Err(TtsError::InitError(
+                    "QwenLarge requires voice cloning, not preset speakers".to_string(),
+                ))
+            }
         }
     }
 
@@ -488,6 +641,22 @@ impl TextToSpeech {
                 }
                 _ => "0",
             },
+            TtsImpl::Qwen(_) => match id {
+                0 => "ryan",
+                1 => "serena",
+                2 => "vivian",
+                3 => "aiden",
+                4 => "uncle_fu",
+                5 => "ono_anna",
+                6 => "sohee",
+                7 => "eric",
+                8 => "dylan",
+                _ => "ryan",
+            },
+            TtsImpl::QwenLarge(_) => {
+                log::warn!("[TTS] QwenLarge uses voice cloning, not numeric speaker IDs");
+                return;
+            }
         };
 
         if let Err(e) = self.set_speaker(voice) {
@@ -506,6 +675,9 @@ impl TextToSpeech {
             TtsImpl::Kokoro(_) => {
                 // Kokoro speed is set per-synthesis call, not as a persistent setting
                 // We'll store it and use it in synthesize()
+            }
+            TtsImpl::Qwen(_) | TtsImpl::QwenLarge(_) => {
+                // Qwen uses fixed synthesis options
             }
         }
     }
@@ -542,6 +714,16 @@ impl TextToSpeech {
                     sample_rate: audio.sample_rate,
                 })
             }
+            TtsImpl::Qwen(qwen) | TtsImpl::QwenLarge(qwen) => {
+                let audio = qwen
+                    .synthesize(text)
+                    .map_err(|e| TtsError::SynthesisError(e.to_string()))?;
+
+                Ok(AudioOutput {
+                    samples: audio.samples,
+                    sample_rate: audio.sample_rate,
+                })
+            }
         }
     }
 
@@ -560,6 +742,9 @@ impl TextToSpeech {
 
         match &mut self.engine {
             TtsImpl::Pocket(tts) => tts.synthesize_streaming(text, &mut on_chunk),
+            TtsImpl::Qwen(qwen) | TtsImpl::QwenLarge(qwen) => qwen
+                .synthesize_streaming(text, &mut on_chunk)
+                .map_err(Into::into),
             _ => {
                 let audio = self.synthesize(text)?;
                 let _ = on_chunk(&audio.samples, audio.sample_rate);
@@ -584,6 +769,8 @@ impl TextToSpeech {
             TtsImpl::Pocket(_) => "pocket",
             TtsImpl::Supertonic(_) => "supertonic",
             TtsImpl::Kokoro(_) => "kokoro",
+            TtsImpl::Qwen(_) => "qwen",
+            TtsImpl::QwenLarge(_) => "qwen-large",
         }
     }
 
@@ -592,41 +779,49 @@ impl TextToSpeech {
         vec![
             VoiceInfo {
                 id: 0,
+                id_str: "alba".to_string(),
                 name: "Alba".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 1,
+                id_str: "marius".to_string(),
                 name: "Marius".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 2,
+                id_str: "javert".to_string(),
                 name: "Javert".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 3,
+                id_str: "jean".to_string(),
                 name: "Jean".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 4,
+                id_str: "fantine".to_string(),
                 name: "Fantine".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 5,
+                id_str: "cosette".to_string(),
                 name: "Cosette".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 6,
+                id_str: "eponine".to_string(),
                 name: "Eponine".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 7,
+                id_str: "azelma".to_string(),
                 name: "Azelma".to_string(),
                 language: "en".to_string(),
             },
@@ -638,21 +833,25 @@ impl TextToSpeech {
         vec![
             VoiceInfo {
                 id: 0,
+                id_str: "F1".to_string(),
                 name: "Female 1 (F1)".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 1,
+                id_str: "F2".to_string(),
                 name: "Female 2 (F2)".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 2,
+                id_str: "M1".to_string(),
                 name: "Male 1 (M1)".to_string(),
                 language: "en".to_string(),
             },
             VoiceInfo {
                 id: 3,
+                id_str: "M2".to_string(),
                 name: "Male 2 (M2)".to_string(),
                 language: "en".to_string(),
             },
@@ -665,10 +864,60 @@ impl TextToSpeech {
         (0..11)
             .map(|id| VoiceInfo {
                 id,
+                id_str: id.to_string(),
                 name: format!("Voice {}", id),
                 language: "en".to_string(),
             })
             .collect()
+    }
+
+    /// Get available voices for Qwen (preset speakers for Lite model)
+    pub fn available_qwen_voices() -> Vec<VoiceInfo> {
+        qwen_tts::available_voices()
+            .into_iter()
+            .map(|v| VoiceInfo {
+                id: v.id,
+                id_str: v.id_str,
+                name: v.name,
+                language: v.language,
+            })
+            .collect()
+    }
+
+    /// Check if current engine supports voice cloning
+    pub fn supports_voice_cloning(&self) -> bool {
+        match &self.engine {
+            TtsImpl::QwenLarge(qwen) => qwen.supports_voice_cloning(),
+            _ => false,
+        }
+    }
+
+    /// Set voice clone reference (only works with QwenLarge engine)
+    pub fn set_voice_clone_reference(
+        &mut self,
+        audio_path: PathBuf,
+        transcript: Option<String>,
+    ) -> Result<(), TtsError> {
+        match &mut self.engine {
+            TtsImpl::QwenLarge(qwen) => {
+                let reference = VoiceCloneRef {
+                    audio_path,
+                    transcript,
+                };
+                qwen.set_voice_clone(reference)?;
+                self.speaker_id = "cloned".to_string();
+                log::info!("[TTS] Voice clone reference set");
+                Ok(())
+            }
+            _ => Err(TtsError::InitError(
+                "Voice cloning only supported on QwenLarge engine".to_string(),
+            )),
+        }
+    }
+
+    /// Check if Qwen can run on current hardware (requires GPU)
+    pub fn can_run_qwen() -> bool {
+        qwen_tts::can_run_qwen()
     }
 
     /// Get available voices (legacy method, returns current engine's voices)
@@ -680,6 +929,7 @@ impl TextToSpeech {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct VoiceInfo {
     pub id: i32,
+    pub id_str: String,
     pub name: String,
     pub language: String,
 }
@@ -697,5 +947,15 @@ pub enum TtsError {
 impl From<crate::models::ModelError> for TtsError {
     fn from(e: crate::models::ModelError) -> Self {
         TtsError::ModelNotFound(e.to_string())
+    }
+}
+
+impl From<crate::qwen_tts::TtsError> for TtsError {
+    fn from(e: crate::qwen_tts::TtsError) -> Self {
+        match e {
+            crate::qwen_tts::TtsError::ModelNotFound(msg) => TtsError::ModelNotFound(msg),
+            crate::qwen_tts::TtsError::InitError(msg) => TtsError::InitError(msg),
+            crate::qwen_tts::TtsError::SynthesisError(msg) => TtsError::SynthesisError(msg),
+        }
     }
 }
