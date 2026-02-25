@@ -141,16 +141,36 @@ fn main() -> Result<()> {
         } => {
             let engine_type = parse_engine(&engine)?;
 
-            let size = match engine_type {
-                TtsEngine::Qwen => QwenModelSize::Lite,
-                TtsEngine::QwenLarge => QwenModelSize::Large,
-                _ => anyhow::bail!("Only qwen and qwen-large engines supported"),
-            };
-
-            if !models::qwen_model_ready(size) {
-                println!("Model not found, downloading...");
-                let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(models::ensure_qwen_model(size, &NoopProgress))?;
+            // Check if models are available, download if needed
+            match engine_type {
+                TtsEngine::QwenOnnx => {
+                    if !models::qwen3_onnx_lite_model_ready() {
+                        println!(
+                            "ONNX Lite model not found at {}. It will be downloaded on first use.",
+                            models::qwen3_onnx_model_dir(true).display()
+                        );
+                    }
+                }
+                TtsEngine::QwenOnnxLarge => {
+                    if !models::qwen3_onnx_model_ready() {
+                        println!(
+                            "ONNX Large model not found at {}. It will be downloaded on first use.",
+                            models::qwen3_onnx_model_dir(false).display()
+                        );
+                    }
+                }
+                _ => {
+                    let size = match engine_type {
+                        TtsEngine::Qwen => QwenModelSize::Lite,
+                        TtsEngine::QwenLarge => QwenModelSize::Large,
+                        _ => anyhow::bail!("Only qwen and qwen-large engines supported"),
+                    };
+                    if !models::qwen_model_ready(size) {
+                        println!("Model not found, downloading...");
+                        let rt = tokio::runtime::Runtime::new()?;
+                        rt.block_on(models::ensure_qwen_model(size, &NoopProgress))?;
+                    }
+                }
             }
 
             let mut tts = TextToSpeech::with_engine(engine_type.clone())
@@ -205,10 +225,47 @@ fn main() -> Result<()> {
             iterations,
         } => {
             let engine_type = parse_engine(&engine)?;
+
+            // For now, only Candle-based Qwen supports detailed benchmarks
+            match engine_type {
+                TtsEngine::QwenOnnx | TtsEngine::QwenOnnxLarge => {
+                    println!("ONNX engine benchmark coming soon! Using TextToSpeech interface...");
+                    let mut tts = TextToSpeech::with_engine(engine_type.clone())
+                        .context("Failed to initialize TTS engine")?;
+
+                    let text = if !text_en.is_empty() {
+                        &text_en
+                    } else {
+                        &text_it
+                    };
+                    println!("Benchmarking with: \"{}\"", text);
+
+                    let start = Instant::now();
+                    let audio = tts.synthesize(text).context("Synthesis failed")?;
+                    let elapsed = start.elapsed();
+
+                    let duration_secs = audio.samples.len() as f32 / audio.sample_rate as f32;
+                    let rtf = if duration_secs > 0.0 {
+                        elapsed.as_secs_f32() / duration_secs
+                    } else {
+                        0.0
+                    };
+
+                    println!("\nResults:");
+                    println!("  Audio duration: {:.2}s", duration_secs);
+                    println!("  Synthesis time: {:.2}s", elapsed.as_secs_f32());
+                    println!("  RTF: {:.2}x", rtf);
+                    return Ok(());
+                }
+                _ => {}
+            }
+
             let size = match engine_type {
                 TtsEngine::Qwen => QwenModelSize::Lite,
                 TtsEngine::QwenLarge => QwenModelSize::Large,
-                _ => anyhow::bail!("Only qwen and qwen-large engines supported"),
+                _ => anyhow::bail!(
+                    "Only qwen and qwen-large engines supported for detailed benchmark"
+                ),
             };
 
             if !models::qwen_model_ready(size) {
@@ -377,7 +434,12 @@ fn parse_engine(s: &str) -> Result<TtsEngine> {
     match s.to_lowercase().as_str() {
         "qwen" | "qwen-lite" => Ok(TtsEngine::Qwen),
         "qwen-large" | "qwenlarge" => Ok(TtsEngine::QwenLarge),
-        _ => anyhow::bail!("Invalid engine '{}'. Use: qwen, qwen-large", s),
+        "qwen-onnx" | "qwen-onnx-lite" => Ok(TtsEngine::QwenOnnx),
+        "qwen-onnx-large" => Ok(TtsEngine::QwenOnnxLarge),
+        _ => anyhow::bail!(
+            "Invalid engine '{}'. Use: qwen, qwen-large, qwen-onnx, qwen-onnx-large",
+            s
+        ),
     }
 }
 
