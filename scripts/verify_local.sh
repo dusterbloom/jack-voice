@@ -4,7 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-export LD_LIBRARY_PATH="${ROOT_DIR}/target/debug:${LD_LIBRARY_PATH:-}"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  export DYLD_LIBRARY_PATH="${ROOT_DIR}/target/debug:${DYLD_LIBRARY_PATH:-}"
+else
+  export LD_LIBRARY_PATH="${ROOT_DIR}/target/debug:${LD_LIBRARY_PATH:-}"
+fi
 
 echo "[1/6] Running jack-voice library tests"
 cargo test -p jack-voice --lib
@@ -52,7 +56,13 @@ const { createInterface } = require("node:readline");
 
 const env = {
   ...process.env,
-  LD_LIBRARY_PATH: `${process.cwd()}/target/debug:${process.env.LD_LIBRARY_PATH ?? ""}`,
+  ...(process.platform === "darwin"
+    ? {
+        DYLD_LIBRARY_PATH: `${process.cwd()}/target/debug:${process.env.DYLD_LIBRARY_PATH ?? ""}`,
+      }
+    : {
+        LD_LIBRARY_PATH: `${process.cwd()}/target/debug:${process.env.LD_LIBRARY_PATH ?? ""}`,
+      }),
 };
 
 const child = spawn("./target/debug/jack-voice-bridge", { stdio: ["pipe", "pipe", "pipe"], env });

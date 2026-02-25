@@ -74,6 +74,9 @@ lazy_static = "1.4"
 # Parking lot mutexes
 parking_lot = "0.12"
 
+# Regex for tokenization
+regex = "1"
+
 [features]
 default = ["download-binaries"]
 download-binaries = ["sherpa-rs/download-binaries"]

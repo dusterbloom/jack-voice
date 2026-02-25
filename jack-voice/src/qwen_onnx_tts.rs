@@ -440,8 +440,10 @@ impl QwenOnnxTts {
         max_new_tokens: usize,
     ) -> Result<Vec<Vec<i64>>, TtsError> {
         let batch_size = input_embeds.shape()[0];
-        let num_code_groups = self.config.num_code_groups as usize;
         let hidden_dim = input_embeds.shape()[2];
+        let vocab_size = self.config.vocab_size as usize;
+        let eos_token_id = self.config.codec_eos_id as i64;
+        const NUM_LAYERS: usize = 28;
 
         let mut full_embeds = input_embeds.clone();
         let mut trailing = trailing_text_hidden.clone();
@@ -453,22 +455,19 @@ impl QwenOnnxTts {
             .append(Axis(1), pad.view())
             .map_err(|e| TtsError::SynthesisError(format!("Failed to append pad: {}", e)))?;
 
+        let seq_len = full_embeds.shape()[1];
         let inputs_embeds_data: Vec<f32> = full_embeds.iter().copied().collect();
-        let inputs_embeds_tensor = Tensor::from_array((
-            [
-                batch_size,
-                inputs_embeds_data.len() / batch_size / hidden_dim,
-                hidden_dim,
-            ],
-            inputs_embeds_data,
-        ))
-        .map_err(|e| TtsError::SynthesisError(format!("Failed to create inputs_embeds: {}", e)))?;
+        let inputs_embeds_tensor =
+            Tensor::from_array(([batch_size, seq_len, hidden_dim], inputs_embeds_data)).map_err(
+                |e| TtsError::SynthesisError(format!("Failed to create inputs_embeds: {}", e)),
+            )?;
 
         let mask_data: Vec<i64> = attention_mask.iter().copied().collect();
-        let attention_mask_tensor =
-            Tensor::from_array(([batch_size, mask_data.len() / batch_size], mask_data)).map_err(
-                |e| TtsError::SynthesisError(format!("Failed to create attention_mask: {}", e)),
-            )?;
+        let mask_len = mask_data.len() / batch_size;
+        let attention_mask_tensor = Tensor::from_array(([batch_size, mask_len], mask_data))
+            .map_err(|e| {
+                TtsError::SynthesisError(format!("Failed to create attention_mask: {}", e))
+            })?;
 
         let prefill_inputs = SessionInputs::from(std::collections::HashMap::from([
             (
@@ -486,112 +485,221 @@ impl QwenOnnxTts {
             .run(prefill_inputs)
             .map_err(|e| TtsError::SynthesisError(format!("talker_prefill failed: {}", e)))?;
 
+        let mut kv_cache: Vec<(Vec<usize>, Vec<f32>, Vec<usize>, Vec<f32>)> =
+            Vec::with_capacity(NUM_LAYERS);
+        for i in 0..NUM_LAYERS {
+            let key = &prefill_outputs[2 + i * 2];
+            let value = &prefill_outputs[2 + i * 2 + 1];
+            let key_shape: Vec<usize> = key.shape().iter().map(|&d| d as usize).collect();
+            let value_shape: Vec<usize> = value.shape().iter().map(|&d| d as usize).collect();
+            let (_, key_data) = key.try_extract_tensor::<f32>().map_err(|e| {
+                TtsError::SynthesisError(format!("Failed to extract key {}: {}", i, e))
+            })?;
+            let (_, value_data) = value.try_extract_tensor::<f32>().map_err(|e| {
+                TtsError::SynthesisError(format!("Failed to extract value {}: {}", i, e))
+            })?;
+            kv_cache.push((
+                key_shape,
+                key_data.to_vec(),
+                value_shape,
+                value_data.to_vec(),
+            ));
+        }
+
         let logits = &prefill_outputs[0];
-        let vocab_size = self.config.vocab_size as usize;
-        let eos_token_id = self.config.codec_eos_id as i64;
+        let (_, logits_data) = logits
+            .try_extract_tensor::<f32>()
+            .map_err(|e| TtsError::SynthesisError(format!("Failed to extract logits: {}", e)))?;
+        let logits_vec: Vec<f32> = logits_data.to_vec();
+        let logits_shape = logits.shape();
+        let seq_out = logits_shape[1] as usize;
+        let last_logits: Vec<f32> =
+            logits_vec[(seq_out - 1) * vocab_size..seq_out * vocab_size].to_vec();
 
         let mut generated_codes: Vec<Vec<i64>> = vec![Vec::new(); batch_size];
         let mut finished = vec![false; batch_size];
+        let mut current_mask_len = mask_len;
 
-        let (_shape, tensor_data) = logits
-            .try_extract_tensor::<f32>()
-            .map_err(|e| TtsError::SynthesisError(format!("Failed to extract logits: {}", e)))?;
-        let logits_data: Vec<f32> = tensor_data.to_vec();
-        let logits_array = Array::from_shape_vec(
-            (
-                batch_size,
-                logits_data.len() / batch_size / vocab_size,
-                vocab_size,
-            ),
-            logits_data,
-        )
-        .map_err(|e| TtsError::SynthesisError(format!("Failed to reshape logits: {}", e)))?;
+        let first_token = Self::sample_token(&last_logits, 50, 0.9, 3072);
+        log::info!(
+            "[QwenOnnx] First token: {} (EOS={})",
+            first_token,
+            first_token == eos_token_id
+        );
+        if first_token == eos_token_id {
+            return Ok(generated_codes);
+        }
+        if first_token >= 0 && first_token < 2048 {
+            generated_codes[0].push(first_token);
+        }
 
-        for step in 0..max_new_tokens {
-            let last_logits_view =
-                logits_array.index_axis(Axis(1), step.min(logits_array.shape()[1] - 1));
-            let last_logits = last_logits_view.to_owned();
-
-            let next_tokens = Self::sample_tokens_array(&last_logits, 50, 1.0, 0.9, 2048);
-
-            for b in 0..batch_size {
-                if finished[b] {
-                    continue;
-                }
-                let token = next_tokens[b];
-                if token == eos_token_id {
-                    finished[b] = true;
-                    continue;
-                }
-                generated_codes[b].push(token);
+        for step in 1..max_new_tokens {
+            if finished[0] {
+                break;
             }
 
-            if finished.iter().all(|&f| f) {
+            let token = generated_codes[0].last().copied().unwrap_or(0);
+
+            let input_ids_shape = [1_usize, 1];
+            let input_tensor = Tensor::from_array((input_ids_shape, vec![token]))
+                .map_err(|e| TtsError::SynthesisError(format!("Failed to create tensor: {}", e)))?;
+            let codec_inputs = SessionInputs::from(std::collections::HashMap::from([(
+                Cow::Borrowed("input_ids"),
+                SessionInputValue::from(input_tensor),
+            )]));
+            let codec_outputs = self
+                .codec_embed_session
+                .run(codec_inputs)
+                .map_err(|e| TtsError::SynthesisError(format!("codec_embed failed: {}", e)))?;
+            let embed = &codec_outputs[0];
+            let (_, embed_data) = embed
+                .try_extract_tensor::<f32>()
+                .map_err(|e| TtsError::SynthesisError(format!("Failed to extract embed: {}", e)))?;
+            let embed_vec: Vec<f32> = embed_data.to_vec();
+
+            let embed_tensor = Tensor::from_array(([1usize, 1usize, hidden_dim], embed_vec))
+                .map_err(|e| {
+                    TtsError::SynthesisError(format!("Failed to create embed tensor: {}", e))
+                })?;
+
+            current_mask_len += 1;
+            let mask_vec = vec![1i64; current_mask_len];
+            let mask_tensor =
+                Tensor::from_array(([1usize, current_mask_len], mask_vec)).map_err(|e| {
+                    TtsError::SynthesisError(format!("Failed to create mask tensor: {}", e))
+                })?;
+
+            let mut decode_inputs: std::collections::HashMap<Cow<str>, SessionInputValue> =
+                std::collections::HashMap::new();
+            decode_inputs.insert(
+                Cow::Borrowed("inputs_embeds"),
+                SessionInputValue::from(embed_tensor),
+            );
+            decode_inputs.insert(
+                Cow::Borrowed("attention_mask"),
+                SessionInputValue::from(mask_tensor),
+            );
+
+            for (i, (key_shape, key_data, value_shape, value_data)) in kv_cache.iter().enumerate() {
+                let key_tensor = Tensor::from_array((key_shape.clone(), key_data.clone()))
+                    .map_err(|e| {
+                        TtsError::SynthesisError(format!("Failed to create key tensor: {}", e))
+                    })?;
+                let value_tensor = Tensor::from_array((value_shape.clone(), value_data.clone()))
+                    .map_err(|e| {
+                        TtsError::SynthesisError(format!("Failed to create value tensor: {}", e))
+                    })?;
+                decode_inputs.insert(
+                    Cow::Owned(format!("past_key_{}", i)),
+                    SessionInputValue::from(key_tensor),
+                );
+                decode_inputs.insert(
+                    Cow::Owned(format!("past_value_{}", i)),
+                    SessionInputValue::from(value_tensor),
+                );
+            }
+
+            let decode_outputs = self
+                .talker_decode_session
+                .run(SessionInputs::from(decode_inputs))
+                .map_err(|e| TtsError::SynthesisError(format!("talker_decode failed: {}", e)))?;
+
+            let decode_logits = &decode_outputs[0];
+            let (_, decode_logits_data) =
+                decode_logits.try_extract_tensor::<f32>().map_err(|e| {
+                    TtsError::SynthesisError(format!("Failed to extract decode logits: {}", e))
+                })?;
+            let decode_logits_vec: Vec<f32> = decode_logits_data.to_vec();
+
+            for i in 0..NUM_LAYERS {
+                let key = &decode_outputs[2 + i * 2];
+                let value = &decode_outputs[2 + i * 2 + 1];
+                let key_shape: Vec<usize> = key.shape().iter().map(|&d| d as usize).collect();
+                let value_shape: Vec<usize> = value.shape().iter().map(|&d| d as usize).collect();
+                let (_, key_data) = key.try_extract_tensor::<f32>().map_err(|e| {
+                    TtsError::SynthesisError(format!("Failed to extract decode key {}: {}", i, e))
+                })?;
+                let (_, value_data) = value.try_extract_tensor::<f32>().map_err(|e| {
+                    TtsError::SynthesisError(format!("Failed to extract decode value {}: {}", i, e))
+                })?;
+                kv_cache[i] = (
+                    key_shape,
+                    key_data.to_vec(),
+                    value_shape,
+                    value_data.to_vec(),
+                );
+            }
+
+            let next_token = Self::sample_token(&decode_logits_vec, 50, 0.9, 3072);
+
+            if next_token == eos_token_id {
+                log::info!("[QwenOnnx] EOS token reached at step {}", step);
+                finished[0] = true;
                 break;
+            }
+
+            if next_token >= 0 && next_token < 2048 {
+                generated_codes[0].push(next_token);
+            } else {
+                log::warn!(
+                    "[QwenOnnx] Skipping invalid token {} at step {}",
+                    next_token,
+                    step
+                );
+            }
+
+            if step % 50 == 0 {
+                log::info!("[QwenOnnx] Generated {} tokens", step);
             }
         }
 
+        log::info!(
+            "[QwenOnnx] Total generated tokens: {}",
+            generated_codes[0].len()
+        );
         Ok(generated_codes)
     }
 
-    fn sample_tokens_array(
-        logits: &Array2<f32>,
-        top_k: i64,
-        _top_p: f32,
-        temperature: f32,
-        codebook_size: i64,
-    ) -> Vec<i64> {
-        let batch = logits.shape()[0];
-        let vocab = logits.shape()[1];
+    fn sample_token(logits: &[f32], top_k: i64, temperature: f32, codebook_size: i64) -> i64 {
+        let vocab = logits.len();
+        let mut scaled = logits.to_vec();
 
-        let mut scaled = logits.clone();
         for val in scaled.iter_mut() {
             *val /= temperature;
         }
 
-        let mut result = Vec::with_capacity(batch);
-
-        for b in 0..batch {
-            let mut row = scaled.index_axis(Axis(0), b).to_vec();
-
-            for i in 0..vocab {
-                if i >= codebook_size as usize {
-                    row[i] = -1e9;
-                }
+        for i in 0..vocab {
+            if i >= codebook_size as usize {
+                scaled[i] = -1e9;
             }
-
-            if top_k > 0 && top_k < vocab as i64 && top_k < codebook_size {
-                let mut sorted: Vec<(usize, f32)> =
-                    row.iter().enumerate().map(|(i, v)| (i, *v)).collect();
-                sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                let threshold = sorted[top_k as usize].1;
-                for val in row.iter_mut() {
-                    if *val < threshold {
-                        *val = -1e9;
-                    }
-                }
-            }
-
-            let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let exp: Vec<f32> = row.iter().map(|v| (v - max_val).exp()).collect();
-            let sum: f32 = exp.iter().sum();
-            let probs: Vec<f32> = exp.iter().map(|v| v / sum).collect();
-
-            let mut cumsum = 0.0f32;
-            let mut sampled = 0usize;
-            let r = rand_simple();
-            for (i, p) in probs.iter().enumerate() {
-                cumsum += *p;
-                if r <= cumsum {
-                    sampled = i;
-                    break;
-                }
-            }
-
-            result.push(sampled as i64);
         }
 
-        result
+        if top_k > 0 && top_k < vocab as i64 {
+            let mut sorted: Vec<(usize, f32)> =
+                scaled.iter().enumerate().map(|(i, v)| (i, *v)).collect();
+            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let threshold = sorted[top_k as usize].1;
+            for val in scaled.iter_mut() {
+                if *val < threshold {
+                    *val = -1e9;
+                }
+            }
+        }
+
+        let max_val = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exp: Vec<f32> = scaled.iter().map(|v| (v - max_val).exp()).collect();
+        let sum: f32 = exp.iter().sum();
+        let probs: Vec<f32> = exp.iter().map(|v| v / sum).collect();
+
+        let mut cumsum = 0.0f32;
+        let r = rand_simple();
+        for (i, p) in probs.iter().enumerate() {
+            cumsum += *p;
+            if r <= cumsum {
+                return i as i64;
+            }
+        }
+        (vocab - 1) as i64
     }
 
     pub fn synthesize(
