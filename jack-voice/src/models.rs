@@ -199,6 +199,46 @@ pub const KOKORO_MODEL: ModelBundle = ModelBundle {
     size_mb: 310,
 };
 
+/// Qwen3-TTS-ONNX model files (1.7B with voice cloning)
+/// From: https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL
+pub const QWEN3_ONNX_MODELS: &[(&str, &str, u64)] = &[
+    // Talker ONNX models
+    ("qwen3-onnx/talker_prefill.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/talker_prefill.onnx", 1600),
+    ("qwen3-onnx/talker_decode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/talker_decode.onnx", 1600),
+    ("qwen3-onnx/code_predictor.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/code_predictor.onnx", 800),
+    // Embeddings
+    ("qwen3-onnx/text_project.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/text_project.onnx", 300),
+    ("qwen3-onnx/codec_embed.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/codec_embed.onnx", 300),
+    ("qwen3-onnx/code_predictor_embed.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/code_predictor_embed.onnx", 300),
+    // Tokenizer
+    ("qwen3-onnx/tokenizer12hz_encode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/tokenizer12hz_encode.onnx", 100),
+    ("qwen3-onnx/tokenizer12hz_decode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/tokenizer12hz_decode.onnx", 100),
+    // Speaker encoder
+    ("qwen3-onnx/speaker_encoder.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/speaker_encoder.onnx", 200),
+    // Model config files
+    ("qwen3-onnx/models/Qwen3-TTS-12Hz-1.7B-Base/config.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-1.7B-Base/config.json", 1),
+    ("qwen3-onnx/models/Qwen3-TTS-12Hz-1.7B-Base/vocab.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-1.7B-Base/vocab.json", 1),
+    ("qwen3-onnx/models/Qwen3-TTS-12Hz-1.7B-Base/merges.txt", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-1.7B-Base/merges.txt", 1),
+    ("qwen3-onnx/models/Qwen3-TTS-12Hz-1.7B-Base/tokenizer_config.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-1.7B-Base/tokenizer_config.json", 1),
+];
+
+/// Qwen3-TTS-ONNX Lite model files (0.6B, no voice cloning)
+pub const QWEN3_ONNX_LITE_MODELS: &[(&str, &str, u64)] = &[
+    ("qwen3-onnx-lite/talker_prefill.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/talker_prefill.onnx", 800),
+    ("qwen3-onnx-lite/talker_decode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/talker_decode.onnx", 800),
+    ("qwen3-onnx-lite/code_predictor.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/code_predictor.onnx", 400),
+    ("qwen3-onnx-lite/text_project.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/text_project.onnx", 150),
+    ("qwen3-onnx-lite/codec_embed.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/codec_embed.onnx", 150),
+    ("qwen3-onnx-lite/code_predictor_embed.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/code_predictor_embed.onnx", 150),
+    ("qwen3-onnx-lite/tokenizer12hz_encode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/tokenizer12hz_encode.onnx", 100),
+    ("qwen3-onnx-lite/tokenizer12hz_decode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/tokenizer12hz_decode.onnx", 100),
+    ("qwen3-onnx-lite/speaker_encoder.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/speaker_encoder.onnx", 200),
+    ("qwen3-onnx-lite/models/Qwen3-TTS-12Hz-0.6B-Base/config.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-0.6B-Base/config.json", 1),
+    ("qwen3-onnx-lite/models/Qwen3-TTS-12Hz-0.6B-Base/vocab.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-0.6B-Base/vocab.json", 1),
+    ("qwen3-onnx-lite/models/Qwen3-TTS-12Hz-0.6B-Base/merges.txt", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-0.6B-Base/merges.txt", 1),
+    ("qwen3-onnx-lite/models/Qwen3-TTS-12Hz-0.6B-Base/tokenizer_config.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-0.6B-Base/tokenizer_config.json", 1),
+];
+
 pub const POCKET_TTS_VARIANT: &str = "b6369a24";
 pub const POCKET_TTS_WEIGHTS_HF_PATH: &str =
     "hf://kyutai/pocket-tts/tts_b6369a24.safetensors@427e3d61b276ed69fdd03de0d185fa8a8d97fc5b";
@@ -266,6 +306,32 @@ pub fn whisper_turbo_model_ready() -> bool {
 
 pub fn kokoro_model_ready() -> bool {
     model_exists(KOKORO_MODEL.extract_dir)
+}
+
+pub fn qwen3_onnx_model_ready() -> bool {
+    get_models_dir()
+        .map(|dir| {
+            let base = dir.join("qwen3-onnx");
+            base.join("talker_prefill.onnx").exists()
+                && base.join("models/Qwen3-TTS-12Hz-1.7B-Base/config.json").exists()
+        })
+        .unwrap_or(false)
+}
+
+pub fn qwen3_onnx_lite_model_ready() -> bool {
+    get_models_dir()
+        .map(|dir| {
+            let base = dir.join("qwen3-onnx-lite");
+            base.join("talker_prefill.onnx").exists()
+                && base.join("models/Qwen3-TTS-12Hz-0.6B-Base/config.json").exists()
+        })
+        .unwrap_or(false)
+}
+
+pub fn qwen3_onnx_model_dir(lite: bool) -> PathBuf {
+    get_models_dir()
+        .map(|dir| dir.join(if lite { "qwen3-onnx-lite" } else { "qwen3-onnx" }))
+        .unwrap_or_else(|_| PathBuf::from(if lite { "qwen3-onnx-lite" } else { "qwen3-onnx" }))
 }
 
 fn huggingface_hub_dir_candidates() -> Vec<PathBuf> {
@@ -699,8 +765,52 @@ pub async fn ensure_qwen_model(
         fn copy_file(src: &std::path::Path, dst: &std::path::Path) -> Result<(), ModelError> {
             fs::copy(src, dst)
                 .map_err(|e| ModelError::IoError(format!("Failed to copy {:?} to {:?}: {}", src, dst, e)))?;
-            Ok(())
+    Ok(())
+}
+
+pub async fn ensure_qwen3_onnx_model(
+    progress: &dyn ModelProgressCallback,
+) -> Result<(), ModelError> {
+    if qwen3_onnx_model_ready() {
+        return Ok(());
+    }
+
+    let models_dir = get_models_dir()?;
+
+    for (filename, url, size_mb) in QWEN3_ONNX_MODELS {
+        let target = models_dir.join(filename);
+        if !target.exists() {
+            let fname = filename.split('/').last().unwrap_or(filename);
+            progress.on_download_start(fname, *size_mb);
+            download_file(url, &target, progress).await?;
+            progress.on_download_complete(fname);
         }
+    }
+
+    Ok(())
+}
+
+pub async fn ensure_qwen3_onnx_lite_model(
+    progress: &dyn ModelProgressCallback,
+) -> Result<(), ModelError> {
+    if qwen3_onnx_lite_model_ready() {
+        return Ok(());
+    }
+
+    let models_dir = get_models_dir()?;
+
+    for (filename, url, size_mb) in QWEN3_ONNX_LITE_MODELS {
+        let target = models_dir.join(filename);
+        if !target.exists() {
+            let fname = filename.split('/').last().unwrap_or(filename);
+            progress.on_download_start(fname, *size_mb);
+            download_file(url, &target, progress).await?;
+            progress.on_download_complete(fname);
+        }
+    }
+
+    Ok(())
+}
         
         copy_file(&paths.model_weights, &target_dir.join("model.safetensors"))?;
         copy_file(&paths.config, &target_dir.join("config.json"))?;
