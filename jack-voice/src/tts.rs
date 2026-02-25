@@ -5,6 +5,8 @@
 // - Kokoro (local multilingual)
 // - Qwen (0.6B lite, preset speakers)
 // - QwenLarge (1.7B, voice cloning)
+// - QwenOnnx (ONNX Runtime, 0.6B lite or 1.7B with voice cloning)
+// - QwenOnnxLarge (ONNX Runtime, 1.7B with voice cloning)
 
 use pocket_tts::{ModelState as PocketModelState, TTSModel as PocketTtsModel};
 use std::path::{Path, PathBuf};
@@ -12,6 +14,7 @@ use supertonic::{TextToSpeech as SupertonicTts, VoiceStyleData};
 
 use crate::kokoro_tts::KokoroTts;
 use crate::models;
+use crate::qwen_onnx_tts::{QwenOnnxModelSize, QwenOnnxTts};
 use crate::qwen_tts::{self, QwenModelSize, QwenTts, VoiceCloneRef};
 
 const POCKET_MODEL_VARIANT: &str = "b6369a24";
@@ -35,6 +38,8 @@ pub enum TtsEngine {
     Kokoro,
     Qwen,
     QwenLarge,
+    QwenOnnx,
+    QwenOnnxLarge,
 }
 
 /// Internal TTS implementation
@@ -44,6 +49,8 @@ enum TtsImpl {
     Kokoro(KokoroTts),
     Qwen(QwenTts),
     QwenLarge(QwenTts),
+    QwenOnnx(QwenOnnxTts),
+    QwenOnnxLarge(QwenOnnxTts),
 }
 
 struct PocketTts {
@@ -366,6 +373,8 @@ impl TextToSpeech {
             TtsEngine::Kokoro => Self::new_kokoro(),
             TtsEngine::Qwen => Self::new_qwen(),
             TtsEngine::QwenLarge => Self::new_qwen_large(),
+            TtsEngine::QwenOnnx => Self::new_qwen_onnx(false),
+            TtsEngine::QwenOnnxLarge => Self::new_qwen_onnx(true),
         }
     }
 
@@ -498,6 +507,43 @@ impl TextToSpeech {
         })
     }
 
+    /// Create Qwen ONNX TTS instance
+    fn new_qwen_onnx(large: bool) -> Result<Self, TtsError> {
+        let model_dir = crate::qwen_onnx_tts::qwen_onnx_model_dir(!large);
+
+        if !model_dir.exists() {
+            return Err(TtsError::ModelNotFound(format!(
+                "Qwen ONNX model not found at {}. Download from huggingface.co/zukky/Qwen3-TTS-ONNX-DLL",
+                model_dir.display()
+            )));
+        }
+
+        let size = if large {
+            QwenOnnxModelSize::Large
+        } else {
+            QwenOnnxModelSize::Lite
+        };
+        let qwen = QwenOnnxTts::new(&model_dir, size)
+            .map_err(|e| TtsError::InitError(format!("Qwen ONNX init failed: {}", e)))?;
+
+        let speaker_id = if large {
+            "cloned".to_string()
+        } else {
+            "default".to_string()
+        };
+
+        Ok(Self {
+            engine: if large {
+                TtsImpl::QwenOnnxLarge(qwen)
+            } else {
+                TtsImpl::QwenOnnx(qwen)
+            },
+            speaker_id,
+            speed: 1.0,
+            sample_rate: 24000,
+        })
+    }
+
     /// Create TTS with specific Supertonic model paths
     pub fn with_supertonic_paths(paths: &models::SupertonicPaths) -> Result<Self, TtsError> {
         // Verify required model files exist
@@ -607,6 +653,12 @@ impl TextToSpeech {
                     "QwenLarge requires voice cloning, not preset speakers".to_string(),
                 ))
             }
+            TtsImpl::QwenOnnx(_) | TtsImpl::QwenOnnxLarge(_) => {
+                log::warn!("[TTS] QwenOnnx does not support preset speakers, use voice cloning");
+                Err(TtsError::InitError(
+                    "QwenOnnx uses ONNX Runtime, preset speakers not supported".to_string(),
+                ))
+            }
         }
     }
 
@@ -657,6 +709,10 @@ impl TextToSpeech {
                 log::warn!("[TTS] QwenLarge uses voice cloning, not numeric speaker IDs");
                 return;
             }
+            TtsImpl::QwenOnnx(_) | TtsImpl::QwenOnnxLarge(_) => {
+                log::warn!("[TTS] QwenOnnx uses voice cloning, not numeric speaker IDs");
+                return;
+            }
         };
 
         if let Err(e) = self.set_speaker(voice) {
@@ -678,6 +734,9 @@ impl TextToSpeech {
             }
             TtsImpl::Qwen(_) | TtsImpl::QwenLarge(_) => {
                 // Qwen uses fixed synthesis options
+            }
+            TtsImpl::QwenOnnx(_) | TtsImpl::QwenOnnxLarge(_) => {
+                // QwenOnnx uses fixed synthesis options
             }
         }
     }
@@ -717,6 +776,16 @@ impl TextToSpeech {
             TtsImpl::Qwen(qwen) | TtsImpl::QwenLarge(qwen) => {
                 let audio = qwen
                     .synthesize(text)
+                    .map_err(|e| TtsError::SynthesisError(e.to_string()))?;
+
+                Ok(AudioOutput {
+                    samples: audio.samples,
+                    sample_rate: audio.sample_rate,
+                })
+            }
+            TtsImpl::QwenOnnx(qwen) | TtsImpl::QwenOnnxLarge(qwen) => {
+                let audio = qwen
+                    .synthesize(text, None)
                     .map_err(|e| TtsError::SynthesisError(e.to_string()))?;
 
                 Ok(AudioOutput {
@@ -771,6 +840,8 @@ impl TextToSpeech {
             TtsImpl::Kokoro(_) => "kokoro",
             TtsImpl::Qwen(_) => "qwen",
             TtsImpl::QwenLarge(_) => "qwen-large",
+            TtsImpl::QwenOnnx(_) => "qwen-onnx",
+            TtsImpl::QwenOnnxLarge(_) => "qwen-onnx-large",
         }
     }
 
@@ -888,6 +959,7 @@ impl TextToSpeech {
     pub fn supports_voice_cloning(&self) -> bool {
         match &self.engine {
             TtsImpl::QwenLarge(qwen) => qwen.supports_voice_cloning(),
+            TtsImpl::QwenOnnxLarge(qwen) => qwen.supports_voice_cloning(),
             _ => false,
         }
     }
