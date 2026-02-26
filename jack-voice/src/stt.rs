@@ -557,8 +557,8 @@ pub struct BatchTranscriber {
     sample_rate: u32,
 }
 
-const STT_MIN_RMS_THRESHOLD: f32 = 0.01;
-const STT_MIN_AMPLITUDE_THRESHOLD: f32 = 0.03;
+const STT_MIN_RMS_THRESHOLD: f32 = 0.0005;
+const STT_MIN_AMPLITUDE_THRESHOLD: f32 = 0.002;
 
 impl BatchTranscriber {
     pub fn new() -> Result<Self, SttError> {
