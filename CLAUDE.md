@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`jack-voice` is a local-first voice stack for developer tools: VAD, STT, TTS, turn detection, and model management in Rust, with an NDJSON bridge + SDKs for coding CLI integration.
+`jack-voice` is a local-first voice stack for developer tools: VAD, STT, TTS, turn detection, and model management in Rust, with an NDJSON bridge, WebSocket server, and SDKs for coding CLI integration.
 
 The goal: any CLI should be able to add voice in one or two lines after `connect()`.
 
@@ -10,7 +10,7 @@ The goal: any CLI should be able to add voice in one or two lines after `connect
 
 ```
 jack-voice/                     # Workspace root
-├── Cargo.toml                  # Workspace manifest (members: jack-voice, jack-voice-bridge, supertonic)
+├── Cargo.toml                  # Workspace manifest (members: jack-voice, jack-voice-bridge, supertonic, jack-voice-realtime)
 ├── SPEC.md                     # V1 protocol specification (the source of truth)
 ├── ROADMAP.md                  # Calendar-dated milestones to GA (2026-05-22)
 ├── PLAN.md                     # Sub-agent delivery plan and quality gates
@@ -23,8 +23,9 @@ jack-voice/                     # Workspace root
 │       ├── vad.rs              # Voice Activity Detection (Silero ONNX)
 │       ├── stt.rs              # Speech-to-Text (Whisper/Moonshine/Parakeet)
 │       ├── parakeet_stt.rs     # Parakeet TDT/EOU backends
-│       ├── tts.rs              # Text-to-Speech (Supertonic/Kokoro)
+│       ├── tts.rs              # Text-to-Speech (Pocket/Supertonic/Kokoro/Qwen)
 │       ├── kokoro_tts.rs       # Kokoro multilingual TTS
+│       ├── qwen_tts.rs         # Qwen3-TTS with voice cloning
 │       ├── models.rs           # Model download, caching, path management
 │       ├── pipeline.rs         # VoicePipeline, VoiceEvent
 │       ├── audio.rs            # Audio capture/playback (cpal/rodio)
@@ -40,6 +41,18 @@ jack-voice/                     # Workspace root
 │       ├── main.rs             # Bridge runtime loop (stdin/stdout NDJSON)
 │       ├── protocol.rs         # Request/Response envelopes, RPC methods, error codes
 │       └── audio.rs            # Base64 audio encoding/decoding
+│
+├── jack-voice-realtime/        # OpenAI-compatible WebSocket server
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs             # Binary entry point
+│       ├── lib.rs
+│       ├── protocol/           # OpenAI Realtime API events
+│       ├── session/            # Session manager (sqlx + SQLite)
+│       ├── audio/              # PCM16 ↔ f32, resampling, buffer
+│       ├── pipeline/           # VAD, STT, TTS, LLM connectors
+│       ├── server/             # WebSocket server (tokio-tungstenite)
+│       └── livekit/            # LiveKit integration (optional, feature-gated)
 │
 ├── supertonic/                 # Standalone Supertonic TTS engine
 │   ├── Cargo.toml
@@ -75,12 +88,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build -p jack-voice
 cargo build -p jack-voice-bridge
 cargo build -p supertonic
+cargo build -p jack-voice-realtime
 cargo test -p jack-voice
 cargo test -p jack-voice-bridge
+cargo test -p jack-voice-realtime
 
 # Feature builds
 cargo build -p jack-voice --features cuda       # CUDA acceleration
 cargo build -p jack-voice --features directml   # DirectML (Windows)
+cargo build -p jack-voice-realtime --features livekit  # LiveKit support
 
 # Release build
 cargo build --workspace --release
@@ -277,13 +293,17 @@ for chunk in model.generate_stream("Long text...", &voice_state) {
 ## Current State & Next Steps
 
 ### Done
-- Core voice library with VAD/STT/TTS
+- Core voice library with VAD/STT/TTS (Pocket/Supertonic/Kokoro/Qwen)
 - NDJSON bridge with all V1 methods
+- jack-voice-realtime: OpenAI-compatible WebSocket server
 - Prototype TS and Python SDKs
 - CLI adapters for codex-voice, claude-voice, etc.
 
-### Next Priority: Pocket TTS Integration
-Add `pocket-tts` as a third TTS engine. It should become the default for English because it's faster, more reliable, and has better voice quality than Supertonic, while being pure Rust with no ONNX dependency.
+### Next Priority: jack-voice-realtime Server
+- Run database migrations on startup
+- Connect to Ollama/vLLM for LLM responses
+- Add LiveKit integration (enable with `--features livekit`)
+- End-to-end integration tests with real WebSocket client
 
 ### After That (per ROADMAP.md)
 - Phase 1 (by 2026-03-20): Bridge MVP with streaming sessions
@@ -299,4 +319,5 @@ If you're new to this codebase, read in this order:
 3. `jack-voice/src/tts.rs` — TTS abstraction layer
 4. `jack-voice-bridge/src/main.rs` — bridge runtime
 5. `jack-voice-bridge/src/protocol.rs` — RPC types
-6. `jack-voice/src/lib.rs` — public API surface
+6. `jack-voice-realtime/src/server/connection.rs` — WebSocket server
+7. `jack-voice/src/lib.rs` — public API surface
