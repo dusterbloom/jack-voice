@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use candle_core::Tensor;
 use qwen3_tts::{
     AudioBuffer, Language, Qwen3TTS, Speaker, SynthesisOptions, SynthesisTiming, VoiceClonePrompt,
 };
@@ -282,7 +283,8 @@ impl QwenTts {
     pub fn get_speaker_embedding(&self) -> Result<Vec<f32>, TtsError> {
         if let Some(ref prompt) = self.voice_clone_prompt {
             prompt
-                .get_embedding_vec()
+                .speaker_embedding
+                .to_vec1()
                 .map_err(|e| TtsError::InitError(format!("Failed to get embedding: {}", e)))
         } else {
             Err(TtsError::InitError(
@@ -299,19 +301,17 @@ impl QwenTts {
             ));
         }
 
-        use candle_core::Tensor;
         let device = self.model.device();
         let embedding_tensor = Tensor::from_vec(embedding.to_vec(), (embedding.len(),), device)
             .map_err(|e| {
                 TtsError::InitError(format!("Failed to create embedding tensor: {}", e))
             })?;
 
-        let prompt = self
-            .model
-            .create_voice_clone_prompt_from_embedding(embedding_tensor)
-            .map_err(|e| {
-                TtsError::InitError(format!("Failed to create voice clone prompt: {}", e))
-            })?;
+        let prompt = VoiceClonePrompt {
+            speaker_embedding: embedding_tensor,
+            ref_codes: None,
+            ref_text_ids: None,
+        };
 
         self.voice_clone_prompt = Some(prompt);
         self.current_speaker = "loaded".to_string();
