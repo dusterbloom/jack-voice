@@ -1,5 +1,5 @@
 [workspace]
-members = ["jack-voice", "jack-voice-bridge", "supertonic", "jack-voice-realtime"]
+members = ["jack-voice", "jack-voice-bridge", "jack-voice-ws"]
 resolver = "2"
 
 [workspace.package]

@@ -20,11 +20,11 @@ The goal is simple: any CLI should be able to add voice in one or two lines.
 ## Project Status
 
 - Available now:
-  - Rust workspace with `jack-voice` and `supertonic` crates
-  - `jack-voice-bridge` subprocess runtime (`stdin`/`stdout` NDJSON)
-  - Prototype SDK wrappers:
-    - `sdk/ts/jack-voice-sdk-ts`
-    - `sdk/python/jack_voice_sdk`
+  - Rust workspace with `jack-voice`, `jack-voice-bridge`, and `jack-voice-ws` crates
+  - `jack-voice-ws` - OpenAI-compatible WebSocket server
+  - SDK wrappers:
+    - `sdk/ts/jack-voice-sdk/`
+    - `sdk/python/jack-voice-sdk/`
 - Spec and delivery plan: `SPEC.md`, `ROADMAP.md`, `PLAN.md`.
 
 ## What You Can Use Today (Rust)

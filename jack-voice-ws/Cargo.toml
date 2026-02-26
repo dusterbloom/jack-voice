@@ -1,6 +1,6 @@
 [package]
-name = "jack-voice-realtime"
-version = "0.1.0"
+name = "jack-voice-ws"
+version.workspace = true
 edition = "2021"
 
 [dependencies]
