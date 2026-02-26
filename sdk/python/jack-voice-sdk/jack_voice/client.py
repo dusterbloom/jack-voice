@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import itertools
 import json
 import os
@@ -11,10 +12,28 @@ import shutil
 import subprocess
 import sys
 import threading
-from typing import Any, Dict, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Union
 
 Command = Union[str, Sequence[str], None]
 BytesLike = Union[bytes, bytearray, memoryview]
+
+
+@dataclasses.dataclass
+class TtsChunkEvent:
+    """A single event from a streaming TTS synthesis."""
+
+    event: str  # "tts.start", "tts.chunk", or "tts.end"
+    data: Dict[str, Any]
+
+    @property
+    def audio_bytes(self) -> bytes:
+        """Decode base64 f32le audio from a tts.chunk event."""
+        b64 = self.data.get("audio_b64", "")
+        return base64.b64decode(b64) if b64 else b""
+
+    @property
+    def sample_rate_hz(self) -> int:
+        return int(self.data.get("sample_rate_hz", 24000))
 
 
 class BridgeError(RuntimeError):
@@ -50,6 +69,8 @@ class JackVoice:
 
         self._pending_lock = threading.Lock()
         self._pending: Dict[str, "queue.Queue[object]"] = {}
+        self._event_subs_lock = threading.Lock()
+        self._event_subs: Dict[str, list] = {}
         self._write_lock = threading.Lock()
 
         self._reader_thread = threading.Thread(
@@ -171,6 +192,98 @@ class JackVoice:
             params.update(options)
         return self._request("tts.synthesize", params, timeout=timeout)
 
+    def tts_stream(
+        self,
+        text: str,
+        *,
+        voice: Optional[str] = None,
+        language: Optional[str] = None,
+        engine: Optional[str] = None,
+        timeout: Optional[float] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[TtsChunkEvent]:
+        """Stream TTS synthesis. Yields TtsChunkEvent for tts.start/tts.chunk/tts.end events."""
+        if self._closed.is_set():
+            raise BridgeClosedError("Bridge connection is closed.", code="PROCESS_EXITED")
+
+        request_id = f"req_{next(self._id_counter)}"
+        event_queue: "queue.Queue[object]" = queue.Queue()
+        reply_queue: "queue.Queue[object]" = queue.Queue(maxsize=1)
+
+        self._register_event_sub(request_id, event_queue)
+        with self._pending_lock:
+            self._pending[request_id] = reply_queue
+
+        params: Dict[str, Any] = {"text": text}
+        if voice is not None:
+            params["voice"] = voice
+        if language is not None:
+            params["language"] = language
+        if engine is not None:
+            params["engine"] = engine
+        if options:
+            params.update(options)
+
+        wait_timeout = self._resolve_timeout(timeout)
+        payload: Dict[str, Any] = {
+            "type": "request",
+            "id": request_id,
+            "method": "tts.stream",
+            "params": params,
+            "timeout_ms": max(1, int(wait_timeout * 1000)),
+        }
+
+        try:
+            line = json.dumps(payload, separators=(",", ":"))
+            with self._write_lock:
+                if self._process.stdin is None or self._process.stdin.closed:
+                    raise BridgeClosedError("Bridge stdin is closed.", code="PROCESS_EXITED")
+                self._process.stdin.write(line + "\n")
+                self._process.stdin.flush()
+        except Exception as exc:
+            self._unregister_event_sub(request_id)
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            if isinstance(exc, BridgeError):
+                raise
+            raise BridgeClosedError("Failed to write request to bridge.", code="WRITE_FAILED") from exc
+
+        try:
+            while True:
+                try:
+                    item = event_queue.get(timeout=0.1)
+                except queue.Empty:
+                    # Check if final response arrived early (error case)
+                    try:
+                        response = reply_queue.get_nowait()
+                        if isinstance(response, Exception):
+                            raise response
+                        break
+                    except queue.Empty:
+                        if self._closed.is_set():
+                            raise BridgeClosedError("Bridge closed during streaming.", code="PROCESS_EXITED")
+                        continue
+
+                if isinstance(item, Exception):
+                    raise item
+                if isinstance(item, dict):
+                    evt = TtsChunkEvent(event=item.get("event", ""), data=item.get("data", {}))
+                    yield evt
+                    if evt.event == "tts.end":
+                        break
+
+            # Drain the final response
+            try:
+                response = reply_queue.get(timeout=wait_timeout)
+                if isinstance(response, Exception):
+                    raise response
+            except queue.Empty:
+                pass
+        finally:
+            self._unregister_event_sub(request_id)
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+
     def close(self, *, timeout: float = 2.0) -> None:
         if self._process.poll() is None and not self._closed.is_set():
             try:
@@ -210,6 +323,7 @@ class JackVoice:
                 pass
 
         self._fail_pending(BridgeClosedError("Bridge connection closed.", code="PROCESS_EXITED"))
+        self._fail_event_subs()
 
     def __enter__(self) -> "JackVoice":
         return self
@@ -299,7 +413,12 @@ class JackVoice:
                     continue
                 if not isinstance(message, dict):
                     continue
-                if message.get("type") != "response":
+
+                msg_type = message.get("type")
+                if msg_type == "event":
+                    self._dispatch_event(message)
+                    continue
+                if msg_type != "response":
                     continue
 
                 response_id = message.get("id")
@@ -334,6 +453,37 @@ class JackVoice:
         for reply_queue in pending:
             try:
                 reply_queue.put_nowait(error)
+            except queue.Full:
+                pass
+
+    def _dispatch_event(self, message: Dict[str, Any]) -> None:
+        request_id = message.get("id")
+        if not isinstance(request_id, str):
+            return
+        with self._event_subs_lock:
+            eq = self._event_subs.get(request_id)
+        if eq is not None:
+            try:
+                eq.put_nowait(message)
+            except queue.Full:
+                pass
+
+    def _register_event_sub(self, request_id: str, eq: "queue.Queue[object]") -> None:
+        with self._event_subs_lock:
+            self._event_subs[request_id] = eq
+
+    def _unregister_event_sub(self, request_id: str) -> None:
+        with self._event_subs_lock:
+            self._event_subs.pop(request_id, None)
+
+    def _fail_event_subs(self) -> None:
+        with self._event_subs_lock:
+            subs = list(self._event_subs.values())
+            self._event_subs.clear()
+        err = BridgeClosedError("Bridge connection closed.", code="PROCESS_EXITED")
+        for eq in subs:
+            try:
+                eq.put_nowait(err)
             except queue.Full:
                 pass
 

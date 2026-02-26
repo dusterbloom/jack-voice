@@ -7,18 +7,21 @@ import json
 import math
 import os
 import pathlib
+import queue
+import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-SDK_ROOT = REPO_ROOT / "sdk" / "python" / "jack_voice_sdk"
+SDK_ROOT = REPO_ROOT / "sdk" / "python" / "jack-voice-sdk"
 if str(SDK_ROOT) not in sys.path:
     sys.path.insert(0, str(SDK_ROOT))
 
-from jack_voice_sdk import BridgeError, JackVoice  # noqa: E402
+from jack_voice import BridgeError, JackVoice, TtsChunkEvent  # noqa: E402
 
 DEFAULT_SECONDS = 5.0
 DEFAULT_SAMPLE_RATE = 16_000
@@ -37,6 +40,145 @@ TARGET_EXECUTABLES: Dict[str, Sequence[str]] = {
 
 class CaptureError(RuntimeError):
     pass
+
+
+class StreamingAudioPlayer:
+    """Plays f32le audio chunks in real-time via ffplay or paplay."""
+
+    def __init__(self, sample_rate_hz: int = 24000, channels: int = 1):
+        self.sample_rate_hz = sample_rate_hz
+        self.channels = channels
+        self._proc: Optional[subprocess.Popen] = None
+        self._start()
+
+    def _start(self) -> None:
+        if sys.platform != "linux" or not shutil.which("paplay"):
+            cmd = [
+                "ffplay", "-nodisp", "-autoexit",
+                "-f", "f32le",
+                "-ar", str(self.sample_rate_hz),
+                "-ac", str(self.channels),
+                "-i", "-",
+            ]
+        else:
+            cmd = [
+                "paplay",
+                f"--format=float32le",
+                f"--rate={self.sample_rate_hz}",
+                f"--channels={self.channels}",
+                "--raw",
+            ]
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def write_chunk(self, audio_bytes: bytes) -> None:
+        if self._proc and self._proc.stdin and self._proc.poll() is None:
+            try:
+                self._proc.stdin.write(audio_bytes)
+                self._proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+
+    def finish(self) -> None:
+        if self._proc:
+            if self._proc.stdin:
+                try:
+                    self._proc.stdin.close()
+                except Exception:
+                    pass
+            try:
+                self._proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+
+
+class SentenceAccumulator:
+    """Accumulate streaming text into sentence-sized chunks for TTS."""
+
+    def __init__(self, on_sentence):
+        self._buffer = ""
+        self._in_code_block = False
+        self._on_sentence = on_sentence
+        self._first_buffered: Optional[float] = None
+
+    def push(self, delta: str) -> None:
+        self._buffer += delta
+        if self._first_buffered is None and self._buffer.strip():
+            self._first_buffered = time.monotonic()
+        self._extract_sentences()
+        self._try_timeout_flush()
+
+    def flush(self) -> None:
+        text = self._buffer.strip()
+        self._buffer = ""
+        self._first_buffered = None
+        if text and not self._in_code_block:
+            cleaned = _strip_inline_markdown(text)
+            if cleaned:
+                self._on_sentence(cleaned)
+
+    def _extract_sentences(self) -> None:
+        while True:
+            idx = self._buffer.find("```")
+            if idx != -1:
+                if not self._in_code_block:
+                    before = self._buffer[:idx].strip()
+                    if before:
+                        cleaned = _strip_inline_markdown(before)
+                        if cleaned:
+                            self._on_sentence(cleaned)
+                self._in_code_block = not self._in_code_block
+                after = idx + 3
+                nl = self._buffer.find("\n", after)
+                if nl != -1:
+                    self._buffer = self._buffer[nl + 1:]
+                else:
+                    self._buffer = self._buffer[after:]
+                    return
+                continue
+
+            if self._in_code_block:
+                return
+
+            pos = _find_sentence_boundary(self._buffer)
+            if pos is not None:
+                sentence = self._buffer[: pos + 1].strip()
+                self._buffer = self._buffer[pos + 1 :]
+                self._first_buffered = None
+                if sentence:
+                    cleaned = _strip_inline_markdown(sentence)
+                    if cleaned:
+                        self._on_sentence(cleaned)
+            else:
+                return
+
+    def _try_timeout_flush(self) -> None:
+        if self._first_buffered is not None:
+            elapsed = time.monotonic() - self._first_buffered
+            if elapsed >= 0.5 and len(self._buffer.strip()) > 20:
+                text = self._buffer.strip()
+                self._buffer = ""
+                self._first_buffered = None
+                cleaned = _strip_inline_markdown(text)
+                if cleaned:
+                    self._on_sentence(cleaned)
+
+
+def _find_sentence_boundary(text: str) -> Optional[int]:
+    for i in range(len(text) - 1):
+        if text[i] in ".!?" and text[i + 1] in " \t\n\r":
+            return i
+    return None
+
+
+def _strip_inline_markdown(text: str) -> str:
+    out = re.sub(r"[*_`~]", "", text)
+    out = re.sub(r"^#{1,6}\s+", "", out, flags=re.MULTILINE)
+    return out.strip()
 
 
 def main() -> int:
@@ -91,6 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output path for decoded f32le bytes. Use '-' to skip file output.",
     )
     tts.add_argument("--json", action="store_true", help="Print full JSON output.")
+    tts.add_argument("--play", action="store_true", help="Play audio as it's synthesized (streaming).")
 
     ask = sub.add_parser(
         "ask",
@@ -158,6 +301,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Stop after N capture turns (0 means unlimited).",
     )
+    chat.add_argument(
+        "--speak",
+        action="store_true",
+        help="Speak target CLI responses via streaming TTS.",
+    )
+    chat.add_argument("--tts-engine", default=DEFAULT_TTS_ENGINE, help="TTS engine for --speak.")
+    chat.add_argument("--tts-voice", default=DEFAULT_TTS_VOICE, help="TTS voice for --speak.")
     chat.add_argument(
         "target_args",
         nargs=argparse.REMAINDER,
@@ -284,10 +434,15 @@ def cmd_tts(args: argparse.Namespace) -> int:
     env = auto_audio_env(os.environ.copy())
     client = JackVoice.connect(env=env)
     try:
-        result = client.tts(args.text, engine=args.engine, voice=args.voice)
+        if args.play:
+            return _cmd_tts_streaming(client, args)
+        return _cmd_tts_oneshot(client, args)
     finally:
         client.close()
 
+
+def _cmd_tts_oneshot(client: JackVoice, args: argparse.Namespace) -> int:
+    result = client.tts(args.text, engine=args.engine, voice=args.voice)
     audio_b64 = str(result.get("audio_b64") or "")
     decoded = base64.b64decode(audio_b64) if audio_b64 else b""
 
@@ -312,6 +467,51 @@ def cmd_tts(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
     else:
         print(json.dumps(summary))
+    return 0
+
+
+def _cmd_tts_streaming(client: JackVoice, args: argparse.Namespace) -> int:
+    player = None
+    collected_audio = bytearray() if args.out != "-" else None
+    total_bytes = 0
+    meta: Dict[str, object] = {}
+
+    for event in client.tts_stream(args.text, engine=args.engine, voice=args.voice):
+        if event.event == "tts.start":
+            meta["engine"] = event.data.get("engine")
+            meta["voice"] = event.data.get("voice")
+        elif event.event == "tts.chunk":
+            audio = event.audio_bytes
+            if audio:
+                if player is None:
+                    sr = event.data.get("sample_rate_hz", 24000)
+                    ch = event.data.get("channels", 1)
+                    player = StreamingAudioPlayer(sample_rate_hz=sr, channels=ch)
+                player.write_chunk(audio)
+                total_bytes += len(audio)
+                if collected_audio is not None:
+                    collected_audio.extend(audio)
+        elif event.event == "tts.end":
+            meta.update({
+                "sample_rate_hz": event.data.get("sample_rate_hz"),
+                "duration_ms": event.data.get("duration_ms"),
+                "chunk_count": event.data.get("chunk_count"),
+                "bytes": total_bytes,
+            })
+
+    if player:
+        player.finish()
+
+    if collected_audio is not None and args.out != "-":
+        out_path = pathlib.Path(args.out).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(bytes(collected_audio))
+        meta["out"] = args.out
+
+    if args.json:
+        print(json.dumps(meta, indent=2))
+    else:
+        print(json.dumps(meta))
     return 0
 
 
@@ -348,56 +548,74 @@ def cmd_chat(args: argparse.Namespace) -> int:
     env = auto_audio_env(os.environ.copy())
     max_turns = int(args.max_turns)
     turns = 0
+    jv_client: Optional[JackVoice] = None
 
     print(
         "[jack-voice-adapter] chat mode: press Enter to record, 'q' to quit.",
         file=sys.stderr,
     )
 
-    while True:
-        if max_turns > 0 and turns >= max_turns:
-            break
+    try:
+        while True:
+            if max_turns > 0 and turns >= max_turns:
+                break
 
-        try:
-            line = input("jv-chat> ").strip().lower()
-        except EOFError:
-            break
+            try:
+                line = input("jv-chat> ").strip().lower()
+            except EOFError:
+                break
 
-        if line in {"q", "quit", "exit"}:
-            break
-        if line and line not in {"r", "rec", "record"}:
-            print("Use Enter to record or 'q' to quit.", file=sys.stderr)
-            continue
+            if line in {"q", "quit", "exit"}:
+                break
+            if line and line not in {"r", "rec", "record"}:
+                print("Use Enter to record or 'q' to quit.", file=sys.stderr)
+                continue
 
-        text, meta = transcribe_from_mic(
-            seconds=args.seconds,
-            language=args.language,
-            source=args.source,
-            env=env,
-        )
-        meta["target"] = args.target
+            text, meta = transcribe_from_mic(
+                seconds=args.seconds,
+                language=args.language,
+                source=args.source,
+                env=env,
+            )
+            meta["target"] = args.target
 
-        if args.json:
-            print(json.dumps(meta, indent=2))
+            if args.json:
+                print(json.dumps(meta, indent=2))
 
-        if not text:
-            print("[jack-voice-adapter] empty transcript; try again.", file=sys.stderr)
-            continue
+            if not text:
+                print("[jack-voice-adapter] empty transcript; try again.", file=sys.stderr)
+                continue
 
-        print(text)
-        turns += 1
+            print(text)
+            turns += 1
 
-        if args.print_only:
-            continue
+            if args.print_only:
+                continue
 
-        rc = dispatch_transcript(
-            target=args.target,
-            transcript=text,
-            override_exec=args.override_exec,
-            target_args=args.target_args,
-        )
-        if rc != 0:
-            print(f"[jack-voice-adapter] target exited with code {rc}", file=sys.stderr)
+            if args.speak:
+                if jv_client is None:
+                    jv_client = JackVoice.connect(env=env)
+                rc = dispatch_transcript_with_tts(
+                    target=args.target,
+                    transcript=text,
+                    override_exec=args.override_exec,
+                    target_args=args.target_args,
+                    tts_client=jv_client,
+                    tts_engine=args.tts_engine,
+                    tts_voice=args.tts_voice,
+                )
+            else:
+                rc = dispatch_transcript(
+                    target=args.target,
+                    transcript=text,
+                    override_exec=args.override_exec,
+                    target_args=args.target_args,
+                )
+            if rc != 0:
+                print(f"[jack-voice-adapter] target exited with code {rc}", file=sys.stderr)
+    finally:
+        if jv_client is not None:
+            jv_client.close()
 
     return 0
 
@@ -447,6 +665,75 @@ def dispatch_transcript(
     print(f"[jack-voice-adapter] launching: {' '.join(cmd[:-1])} '<transcript>'", file=sys.stderr)
     completed = subprocess.run(cmd, check=False)
     return int(completed.returncode)
+
+
+def dispatch_transcript_with_tts(
+    *,
+    target: str,
+    transcript: str,
+    override_exec: Optional[str],
+    target_args: Sequence[str],
+    tts_client: JackVoice,
+    tts_engine: str,
+    tts_voice: str,
+) -> int:
+    """Launch target CLI, capture stdout, stream responses through TTS."""
+    executable = override_exec or resolve_executable_name(target)
+    if not executable:
+        print(f"[jack-voice-adapter] target CLI '{target}' not found in PATH.", file=sys.stderr)
+        print(transcript)
+        return 2
+
+    passthrough = normalize_target_args(target_args)
+    cmd = [executable, *passthrough, transcript]
+    print(f"[jack-voice-adapter] launching: {' '.join(cmd[:-1])} '<transcript>'", file=sys.stderr)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        text=True,
+        bufsize=1,
+    )
+
+    tts_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def tts_worker() -> None:
+        while True:
+            sentence = tts_queue.get()
+            if sentence is None:
+                break
+            try:
+                player = None
+                for event in tts_client.tts_stream(sentence, engine=tts_engine, voice=tts_voice):
+                    if event.event == "tts.start":
+                        sr = event.data.get("sample_rate_hz", 24000)
+                        ch = event.data.get("channels", 1)
+                        player = StreamingAudioPlayer(sample_rate_hz=sr, channels=ch)
+                    elif event.event == "tts.chunk" and player:
+                        player.write_chunk(event.audio_bytes)
+                    elif event.event == "tts.end" and player:
+                        player.finish()
+            except Exception as exc:
+                print(f"[jack-voice-adapter] TTS error: {exc}", file=sys.stderr)
+
+    worker = threading.Thread(target=tts_worker, daemon=True)
+    worker.start()
+
+    acc = SentenceAccumulator(on_sentence=lambda s: tts_queue.put(s))
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        acc.push(line)
+
+    acc.flush()
+    tts_queue.put(None)
+    worker.join(timeout=30)
+
+    proc.wait()
+    return int(proc.returncode)
 
 
 def normalize_target_args(target_args: Sequence[str]) -> List[str]:
