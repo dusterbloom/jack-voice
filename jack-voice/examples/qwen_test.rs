@@ -4,30 +4,39 @@
 //!   download     Download Qwen model
 //!   synthesize   Synthesize text to audio file
 //!   benchmark    Run performance benchmark with timing breakdown
-//!   voices       List available voices
+//!   voices       List available voices (presets + saved)
+//!   delete-voice Delete a saved voice
 //!   info         Show model info and system status
 //!
 //! Examples:
-//!   # Download models
-//!   cargo run --example qwen_test -- download --size lite
-//!   cargo run --example qwen_test -- download --size large
+//!   # Download models (one-time)
+//!   cargo run --release --example qwen_test --features cuda -- download --size lite
+//!   cargo run --release --example qwen_test --features cuda -- download --size large
 //!
-//!   # Synthesize with preset voice (Lite)
-//!   cargo run --example qwen_test -- synthesize --engine qwen \
+//!   # Synthesize with preset voice (auto-downloads Lite model)
+//!   cargo run --release --example qwen_test --features cuda -- synthesize \
 //!     --text "Hello world" --voice ryan --output hello.wav
 //!
 //!   # Synthesize Italian text
-//!   cargo run --example qwen_test -- synthesize --engine qwen \
+//!   cargo run --release --example qwen_test --features cuda -- synthesize \
 //!     --text "La corazzata potioschi e' una cagata pazzesca" --output italian.wav
 //!
-//!   # Synthesize with voice cloning (Large only)
-//!   cargo run --example qwen_test -- synthesize --engine qwen-large \
-//!     --text "La corazzata potioschi e' una cagata pazzesca" \
-//!     --ref-audio test_fixtures/carriera_fantozzi.wav \
+//!   # Voice cloning with save (auto-downloads Large model)
+//!   cargo run --release --example qwen_test --features cuda -- synthesize \
+//!     --text "Hello with my voice" \
+//!     --ref-audio my_voice.wav \
+//!     --save-voice my_voice \
 //!     --output cloned.wav
 //!
-//!   # Benchmark performance with timing breakdown
-//!   cargo run --example qwen_test --features cuda -- benchmark --engine qwen --iterations 3
+//!   # Use saved voice (auto-uses Large model)
+//!   cargo run --release --example qwen_test --features cuda -- synthesize \
+//!     --text "Hello again" --voice my_voice --output output.wav
+//!
+//!   # List all voices
+//!   cargo run --release --example qwen_test --features cuda -- voices
+//!
+//!   # Benchmark performance
+//!   cargo run --release --example qwen_test --features cuda -- benchmark --iterations 3
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -55,25 +64,25 @@ enum Commands {
 
     /// Synthesize text to audio file
     Synthesize {
-        /// TTS engine: qwen or qwen-large
-        #[arg(short, long, default_value = "qwen")]
-        engine: String,
-
         /// Text to synthesize
         #[arg(short, long)]
         text: String,
 
-        /// Voice ID for preset (qwen only): ryan, serena, vivian, etc.
+        /// Voice: preset name (ryan, serena, etc.), saved voice name, or "cloned" for voice cloning
         #[arg(short, long, default_value = "ryan")]
         voice: String,
 
-        /// Reference audio for voice cloning (qwen-large only)
+        /// Reference audio for voice cloning (enables Large model + cloning)
         #[arg(short, long)]
         ref_audio: Option<PathBuf>,
 
         /// Transcript for reference audio (optional, improves cloning)
         #[arg(long)]
         ref_transcript: Option<String>,
+
+        /// Save the cloned voice with this name for reuse
+        #[arg(long)]
+        save_voice: Option<String>,
 
         /// Output WAV file
         #[arg(short, long, default_value = "output.wav")]
@@ -102,8 +111,14 @@ enum Commands {
         iterations: usize,
     },
 
-    /// List available voices
+    /// List available voices (presets + saved)
     Voices,
+
+    /// Delete a saved voice
+    DeleteVoice {
+        /// Voice name to delete
+        name: String,
+    },
 
     /// Show model info and system status
     Info,
@@ -132,63 +147,50 @@ fn main() -> Result<()> {
         }
 
         Commands::Synthesize {
-            engine,
             text,
             voice,
             ref_audio,
             ref_transcript,
+            save_voice,
             output,
         } => {
-            let engine_type = parse_engine(&engine)?;
+            // Determine if we need voice cloning (Large model)
+            let needs_cloning = ref_audio.is_some() || models::voice_embedding_exists(&voice);
 
-            // Check if models are available, download if needed
-            match engine_type {
-                TtsEngine::QwenOnnx => {
-                    if !models::qwen3_onnx_lite_model_ready() {
-                        println!(
-                            "ONNX Lite model not found at {}. It will be downloaded on first use.",
-                            models::qwen3_onnx_model_dir(true).display()
-                        );
-                    }
-                }
-                TtsEngine::QwenOnnxLarge => {
-                    if !models::qwen3_onnx_model_ready() {
-                        println!(
-                            "ONNX Large model not found at {}. It will be downloaded on first use.",
-                            models::qwen3_onnx_model_dir(false).display()
-                        );
-                    }
-                }
-                _ => {
-                    let size = match engine_type {
-                        TtsEngine::Qwen => QwenModelSize::Lite,
-                        TtsEngine::QwenLarge => QwenModelSize::Large,
-                        _ => anyhow::bail!("Only qwen and qwen-large engines supported"),
-                    };
-                    if !models::qwen_model_ready(size) {
-                        println!("Model not found, downloading...");
-                        let rt = tokio::runtime::Runtime::new()?;
-                        rt.block_on(models::ensure_qwen_model(size, &NoopProgress))?;
-                    }
-                }
-            }
+            // Auto-select engine based on requirements
+            let engine_type = if needs_cloning {
+                TtsEngine::QwenLarge
+            } else {
+                TtsEngine::Qwen
+            };
 
-            let mut tts = TextToSpeech::with_engine(engine_type.clone())
+            // Create TTS with auto-download
+            let mut tts = TextToSpeech::with_engine_auto(engine_type)
                 .context("Failed to initialize TTS engine")?;
 
+            // Handle voice selection
             if let Some(ref_audio_path) = ref_audio {
-                if engine_type != TtsEngine::QwenLarge {
-                    anyhow::bail!("Voice cloning requires --engine qwen-large");
-                }
                 if !ref_audio_path.exists() {
                     anyhow::bail!("Reference audio not found: {:?}", ref_audio_path);
                 }
                 tts.set_voice_clone_reference(ref_audio_path.clone(), ref_transcript)
                     .context("Failed to set voice clone reference")?;
                 println!("Using voice clone from: {:?}", ref_audio_path);
-            } else if engine_type == TtsEngine::Qwen {
+
+                // Save voice if requested
+                if let Some(save_name) = save_voice {
+                    tts.save_voice(&save_name).context("Failed to save voice")?;
+                    println!("✓ Saved voice as '{}'", save_name);
+                }
+            } else if models::voice_embedding_exists(&voice) {
+                // Load saved voice from library
+                tts.load_voice(&voice)
+                    .context("Failed to load saved voice")?;
+                println!("Using saved voice: {}", voice);
+            } else {
+                // Use preset voice
                 tts.set_speaker(&voice).context("Failed to set voice")?;
-                println!("Using voice: {}", voice);
+                println!("Using preset voice: {}", voice);
             }
 
             println!("Synthesizing: \"{}\"", text);
@@ -225,47 +227,10 @@ fn main() -> Result<()> {
             iterations,
         } => {
             let engine_type = parse_engine(&engine)?;
-
-            // For now, only Candle-based Qwen supports detailed benchmarks
-            match engine_type {
-                TtsEngine::QwenOnnx | TtsEngine::QwenOnnxLarge => {
-                    println!("ONNX engine benchmark coming soon! Using TextToSpeech interface...");
-                    let mut tts = TextToSpeech::with_engine(engine_type.clone())
-                        .context("Failed to initialize TTS engine")?;
-
-                    let text = if !text_en.is_empty() {
-                        &text_en
-                    } else {
-                        &text_it
-                    };
-                    println!("Benchmarking with: \"{}\"", text);
-
-                    let start = Instant::now();
-                    let audio = tts.synthesize(text).context("Synthesis failed")?;
-                    let elapsed = start.elapsed();
-
-                    let duration_secs = audio.samples.len() as f32 / audio.sample_rate as f32;
-                    let rtf = if duration_secs > 0.0 {
-                        elapsed.as_secs_f32() / duration_secs
-                    } else {
-                        0.0
-                    };
-
-                    println!("\nResults:");
-                    println!("  Audio duration: {:.2}s", duration_secs);
-                    println!("  Synthesis time: {:.2}s", elapsed.as_secs_f32());
-                    println!("  RTF: {:.2}x", rtf);
-                    return Ok(());
-                }
-                _ => {}
-            }
-
             let size = match engine_type {
                 TtsEngine::Qwen => QwenModelSize::Lite,
                 TtsEngine::QwenLarge => QwenModelSize::Large,
-                _ => anyhow::bail!(
-                    "Only qwen and qwen-large engines supported for detailed benchmark"
-                ),
+                _ => anyhow::bail!("Only qwen and qwen-large engines supported"),
             };
 
             if !models::qwen_model_ready(size) {
@@ -355,13 +320,39 @@ fn main() -> Result<()> {
         }
 
         Commands::Voices => {
-            println!("Available Qwen preset voices (Lite model):");
+            println!("Available Voices");
+            println!("================");
             println!();
+
+            println!("Preset Voices (Lite model):");
             for (id, name) in jack_voice::QWEN_LITE_VOICES {
                 println!("  {:12} {}", id, name);
             }
             println!();
-            println!("Note: Qwen Large uses voice cloning, not preset voices.");
+
+            let saved_voices =
+                models::list_saved_voices().context("Failed to list saved voices")?;
+            if saved_voices.is_empty() {
+                println!("Saved Voices: (none)");
+            } else {
+                println!("Saved Voices (from voice cloning):");
+                for name in saved_voices {
+                    println!("  {}", name);
+                }
+            }
+            println!();
+            println!("Usage:");
+            println!("  Preset:   --voice ryan");
+            println!("  Saved:    --voice my_voice (auto-uses Large model)");
+            println!("  Clone:    --ref-audio voice.wav --save-voice my_voice");
+        }
+
+        Commands::DeleteVoice { name } => {
+            if !models::voice_embedding_exists(&name) {
+                anyhow::bail!("Voice '{}' not found in library", name);
+            }
+            TextToSpeech::delete_saved_voice(&name).context("Failed to delete voice")?;
+            println!("✓ Deleted voice '{}'", name);
         }
 
         Commands::Info => {
@@ -399,10 +390,18 @@ fn main() -> Result<()> {
             }
             println!();
 
+            let saved_voices =
+                models::list_saved_voices().context("Failed to list saved voices")?;
             println!(
-                "Preset Voices: {} available",
-                jack_voice::QWEN_LITE_VOICES.len()
+                "Voices: {} presets + {} saved",
+                jack_voice::QWEN_LITE_VOICES.len(),
+                saved_voices.len()
             );
+            if !saved_voices.is_empty() {
+                for name in saved_voices {
+                    println!("  Saved: {}", name);
+                }
+            }
             println!();
 
             println!("Model Sizes:");
@@ -434,12 +433,7 @@ fn parse_engine(s: &str) -> Result<TtsEngine> {
     match s.to_lowercase().as_str() {
         "qwen" | "qwen-lite" => Ok(TtsEngine::Qwen),
         "qwen-large" | "qwenlarge" => Ok(TtsEngine::QwenLarge),
-        "qwen-onnx" | "qwen-onnx-lite" => Ok(TtsEngine::QwenOnnx),
-        "qwen-onnx-large" => Ok(TtsEngine::QwenOnnxLarge),
-        _ => anyhow::bail!(
-            "Invalid engine '{}'. Use: qwen, qwen-large, qwen-onnx, qwen-onnx-large",
-            s
-        ),
+        _ => anyhow::bail!("Invalid engine '{}'. Use: qwen, qwen-large", s),
     }
 }
 

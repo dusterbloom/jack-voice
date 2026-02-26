@@ -5,8 +5,6 @@
 // - Kokoro (local multilingual)
 // - Qwen (0.6B lite, preset speakers)
 // - QwenLarge (1.7B, voice cloning)
-// - QwenOnnx (ONNX Runtime, 0.6B lite or 1.7B with voice cloning)
-// - QwenOnnxLarge (ONNX Runtime, 1.7B with voice cloning)
 
 use pocket_tts::{ModelState as PocketModelState, TTSModel as PocketTtsModel};
 use std::path::{Path, PathBuf};
@@ -14,7 +12,6 @@ use supertonic::{TextToSpeech as SupertonicTts, VoiceStyleData};
 
 use crate::kokoro_tts::KokoroTts;
 use crate::models;
-use crate::qwen_onnx_tts::{QwenOnnxModelSize, QwenOnnxTts};
 use crate::qwen_tts::{self, QwenModelSize, QwenTts, VoiceCloneRef};
 
 const POCKET_MODEL_VARIANT: &str = "b6369a24";
@@ -38,8 +35,6 @@ pub enum TtsEngine {
     Kokoro,
     Qwen,
     QwenLarge,
-    QwenOnnx,
-    QwenOnnxLarge,
 }
 
 /// Internal TTS implementation
@@ -49,8 +44,6 @@ enum TtsImpl {
     Kokoro(KokoroTts),
     Qwen(QwenTts),
     QwenLarge(QwenTts),
-    QwenOnnx(QwenOnnxTts),
-    QwenOnnxLarge(QwenOnnxTts),
 }
 
 struct PocketTts {
@@ -350,6 +343,46 @@ mod tests {
         let result = TextToSpeech::can_run_qwen();
         assert!(result == true || result == false, "Should return a boolean");
     }
+
+    // ========================================
+    // Unified Qwen Engine Tests (RED phase - TDD)
+    // ========================================
+
+    #[test]
+    fn with_engine_auto_exists() {
+        let _ = TextToSpeech::with_engine_auto(TtsEngine::Qwen);
+    }
+
+    #[test]
+    fn new_qwen_with_voice_auto_exists() {
+        let _ = TextToSpeech::new_qwen_with_voice_auto(None);
+    }
+
+    #[test]
+    fn save_voice_exists() {
+        let tts = TextToSpeech::with_engine(TtsEngine::QwenLarge);
+        if let Ok(mut tts) = tts {
+            let _ = tts.save_voice("test");
+        }
+    }
+
+    #[test]
+    fn load_voice_exists() {
+        let tts = TextToSpeech::with_engine(TtsEngine::QwenLarge);
+        if let Ok(mut tts) = tts {
+            let _ = tts.load_voice("test");
+        }
+    }
+
+    #[test]
+    fn list_saved_voices_on_tts_exists() {
+        let _ = TextToSpeech::list_saved_voices();
+    }
+
+    #[test]
+    fn delete_saved_voice_exists() {
+        let _ = TextToSpeech::delete_saved_voice("test");
+    }
 }
 
 pub struct TextToSpeech {
@@ -373,8 +406,6 @@ impl TextToSpeech {
             TtsEngine::Kokoro => Self::new_kokoro(),
             TtsEngine::Qwen => Self::new_qwen(),
             TtsEngine::QwenLarge => Self::new_qwen_large(),
-            TtsEngine::QwenOnnx => Self::new_qwen_onnx(false),
-            TtsEngine::QwenOnnxLarge => Self::new_qwen_onnx(true),
         }
     }
 
@@ -507,43 +538,6 @@ impl TextToSpeech {
         })
     }
 
-    /// Create Qwen ONNX TTS instance
-    fn new_qwen_onnx(large: bool) -> Result<Self, TtsError> {
-        let model_dir = crate::qwen_onnx_tts::qwen_onnx_model_dir(!large);
-
-        if !model_dir.exists() {
-            return Err(TtsError::ModelNotFound(format!(
-                "Qwen ONNX model not found at {}. Download from huggingface.co/zukky/Qwen3-TTS-ONNX-DLL",
-                model_dir.display()
-            )));
-        }
-
-        let size = if large {
-            QwenOnnxModelSize::Large
-        } else {
-            QwenOnnxModelSize::Lite
-        };
-        let qwen = QwenOnnxTts::new(&model_dir, size)
-            .map_err(|e| TtsError::InitError(format!("Qwen ONNX init failed: {}", e)))?;
-
-        let speaker_id = if large {
-            "cloned".to_string()
-        } else {
-            "default".to_string()
-        };
-
-        Ok(Self {
-            engine: if large {
-                TtsImpl::QwenOnnxLarge(qwen)
-            } else {
-                TtsImpl::QwenOnnx(qwen)
-            },
-            speaker_id,
-            speed: 1.0,
-            sample_rate: 24000,
-        })
-    }
-
     /// Create TTS with specific Supertonic model paths
     pub fn with_supertonic_paths(paths: &models::SupertonicPaths) -> Result<Self, TtsError> {
         // Verify required model files exist
@@ -653,12 +647,6 @@ impl TextToSpeech {
                     "QwenLarge requires voice cloning, not preset speakers".to_string(),
                 ))
             }
-            TtsImpl::QwenOnnx(_) | TtsImpl::QwenOnnxLarge(_) => {
-                log::warn!("[TTS] QwenOnnx does not support preset speakers, use voice cloning");
-                Err(TtsError::InitError(
-                    "QwenOnnx uses ONNX Runtime, preset speakers not supported".to_string(),
-                ))
-            }
         }
     }
 
@@ -709,10 +697,6 @@ impl TextToSpeech {
                 log::warn!("[TTS] QwenLarge uses voice cloning, not numeric speaker IDs");
                 return;
             }
-            TtsImpl::QwenOnnx(_) | TtsImpl::QwenOnnxLarge(_) => {
-                log::warn!("[TTS] QwenOnnx uses voice cloning, not numeric speaker IDs");
-                return;
-            }
         };
 
         if let Err(e) = self.set_speaker(voice) {
@@ -734,9 +718,6 @@ impl TextToSpeech {
             }
             TtsImpl::Qwen(_) | TtsImpl::QwenLarge(_) => {
                 // Qwen uses fixed synthesis options
-            }
-            TtsImpl::QwenOnnx(_) | TtsImpl::QwenOnnxLarge(_) => {
-                // QwenOnnx uses fixed synthesis options
             }
         }
     }
@@ -776,16 +757,6 @@ impl TextToSpeech {
             TtsImpl::Qwen(qwen) | TtsImpl::QwenLarge(qwen) => {
                 let audio = qwen
                     .synthesize(text)
-                    .map_err(|e| TtsError::SynthesisError(e.to_string()))?;
-
-                Ok(AudioOutput {
-                    samples: audio.samples,
-                    sample_rate: audio.sample_rate,
-                })
-            }
-            TtsImpl::QwenOnnx(qwen) | TtsImpl::QwenOnnxLarge(qwen) => {
-                let audio = qwen
-                    .synthesize(text, None)
                     .map_err(|e| TtsError::SynthesisError(e.to_string()))?;
 
                 Ok(AudioOutput {
@@ -840,8 +811,6 @@ impl TextToSpeech {
             TtsImpl::Kokoro(_) => "kokoro",
             TtsImpl::Qwen(_) => "qwen",
             TtsImpl::QwenLarge(_) => "qwen-large",
-            TtsImpl::QwenOnnx(_) => "qwen-onnx",
-            TtsImpl::QwenOnnxLarge(_) => "qwen-onnx-large",
         }
     }
 
@@ -959,7 +928,6 @@ impl TextToSpeech {
     pub fn supports_voice_cloning(&self) -> bool {
         match &self.engine {
             TtsImpl::QwenLarge(qwen) => qwen.supports_voice_cloning(),
-            TtsImpl::QwenOnnxLarge(qwen) => qwen.supports_voice_cloning(),
             _ => false,
         }
     }
@@ -995,6 +963,100 @@ impl TextToSpeech {
     /// Get available voices (legacy method, returns current engine's voices)
     pub fn available_voices() -> Vec<VoiceInfo> {
         Self::available_pocket_voices()
+    }
+
+    // ========================================
+    // Voice Library API
+    // ========================================
+
+    /// List all saved voices in the library
+    pub fn list_saved_voices() -> Result<Vec<String>, TtsError> {
+        models::list_saved_voices().map_err(|e| TtsError::InitError(e.to_string()))
+    }
+
+    /// Save the current voice clone to the library (only works with QwenLarge)
+    pub fn save_voice(&mut self, name: &str) -> Result<(), TtsError> {
+        match &self.engine {
+            TtsImpl::QwenLarge(qwen) => {
+                let embedding = qwen.get_speaker_embedding().map_err(|e| {
+                    TtsError::InitError(format!("Failed to get speaker embedding: {}", e))
+                })?;
+                models::save_voice_embedding(name, &embedding)
+                    .map_err(|e| TtsError::InitError(e.to_string()))?;
+                log::info!("[TTS] Saved voice '{}' to library", name);
+                Ok(())
+            }
+            _ => Err(TtsError::InitError(
+                "Voice saving only supported on QwenLarge engine".to_string(),
+            )),
+        }
+    }
+
+    /// Load a voice from the library (only works with QwenLarge)
+    pub fn load_voice(&mut self, name: &str) -> Result<(), TtsError> {
+        match &mut self.engine {
+            TtsImpl::QwenLarge(qwen) => {
+                let embedding = models::load_voice_embedding(name)
+                    .map_err(|e| TtsError::InitError(e.to_string()))?;
+                qwen.set_speaker_embedding(&embedding).map_err(|e| {
+                    TtsError::InitError(format!("Failed to set speaker embedding: {}", e))
+                })?;
+                self.speaker_id = name.to_string();
+                log::info!("[TTS] Loaded voice '{}' from library", name);
+                Ok(())
+            }
+            _ => Err(TtsError::InitError(
+                "Voice loading only supported on QwenLarge engine".to_string(),
+            )),
+        }
+    }
+
+    /// Delete a voice from the library
+    pub fn delete_saved_voice(name: &str) -> Result<(), TtsError> {
+        models::delete_voice_embedding(name).map_err(|e| TtsError::InitError(e.to_string()))
+    }
+
+    // ========================================
+    // Unified Qwen Engine API
+    // ========================================
+
+    /// Create TTS with auto-download support
+    pub fn with_engine_auto(engine_type: TtsEngine) -> Result<Self, TtsError> {
+        if matches!(engine_type, TtsEngine::Qwen | TtsEngine::QwenLarge) {
+            let size = match engine_type {
+                TtsEngine::Qwen => qwen_tts::QwenModelSize::Lite,
+                TtsEngine::QwenLarge => qwen_tts::QwenModelSize::Large,
+                _ => unreachable!(),
+            };
+
+            if !models::qwen_model_ready(size) {
+                log::info!("[TTS] Model not ready, auto-downloading...");
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    TtsError::InitError(format!("Failed to create tokio runtime: {}", e))
+                })?;
+                rt.block_on(models::ensure_qwen_model(size, &models::NoopProgress))
+                    .map_err(|e| TtsError::InitError(format!("Model download failed: {}", e)))?;
+            }
+        }
+
+        Self::with_engine(engine_type)
+    }
+
+    /// Create Qwen TTS with optional voice (auto-downloads model, auto-selects Large for voice cloning)
+    pub fn new_qwen_with_voice_auto(voice_name: Option<&str>) -> Result<Self, TtsError> {
+        if let Some(name) = voice_name {
+            if models::voice_embedding_exists(name) {
+                let mut tts = Self::with_engine_auto(TtsEngine::QwenLarge)?;
+                tts.load_voice(name)?;
+                Ok(tts)
+            } else {
+                let mut tts = Self::with_engine_auto(TtsEngine::Qwen)?;
+                tts.set_speaker(name)?;
+                Ok(tts)
+            }
+        } else {
+            Self::with_engine_auto(TtsEngine::Qwen)
+        }
     }
 }
 

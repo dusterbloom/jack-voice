@@ -277,6 +277,47 @@ impl QwenTts {
     pub fn model_size(&self) -> QwenModelSize {
         self.size
     }
+
+    /// Get the current speaker embedding (only available after voice clone is set)
+    pub fn get_speaker_embedding(&self) -> Result<Vec<f32>, TtsError> {
+        if let Some(ref prompt) = self.voice_clone_prompt {
+            prompt
+                .get_embedding_vec()
+                .map_err(|e| TtsError::InitError(format!("Failed to get embedding: {}", e)))
+        } else {
+            Err(TtsError::InitError(
+                "No voice clone prompt set. Call set_voice_clone first.".to_string(),
+            ))
+        }
+    }
+
+    /// Set the speaker embedding directly (bypasses reference audio encoding)
+    pub fn set_speaker_embedding(&mut self, embedding: &[f32]) -> Result<(), TtsError> {
+        if !self.model.supports_voice_cloning() {
+            return Err(TtsError::InitError(
+                "Speaker embedding only supported on Large model with voice cloning.".to_string(),
+            ));
+        }
+
+        use candle_core::Tensor;
+        let device = self.model.device();
+        let embedding_tensor = Tensor::from_vec(embedding.to_vec(), (embedding.len(),), device)
+            .map_err(|e| {
+                TtsError::InitError(format!("Failed to create embedding tensor: {}", e))
+            })?;
+
+        let prompt = self
+            .model
+            .create_voice_clone_prompt_from_embedding(embedding_tensor)
+            .map_err(|e| {
+                TtsError::InitError(format!("Failed to create voice clone prompt: {}", e))
+            })?;
+
+        self.voice_clone_prompt = Some(prompt);
+        self.current_speaker = "loaded".to_string();
+        log::info!("[QwenTTS] Set speaker embedding ({} dims)", embedding.len());
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]

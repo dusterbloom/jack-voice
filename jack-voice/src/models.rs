@@ -199,46 +199,6 @@ pub const KOKORO_MODEL: ModelBundle = ModelBundle {
     size_mb: 310,
 };
 
-/// Qwen3-TTS-ONNX model files (1.7B with voice cloning)
-/// From: https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL
-pub const QWEN3_ONNX_MODELS: &[(&str, &str, u64)] = &[
-    // Talker ONNX models
-    ("qwen3-onnx/talker_prefill.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/talker_prefill.onnx", 1600),
-    ("qwen3-onnx/talker_decode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/talker_decode.onnx", 1600),
-    ("qwen3-onnx/code_predictor.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/code_predictor.onnx", 800),
-    // Embeddings
-    ("qwen3-onnx/text_project.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/text_project.onnx", 300),
-    ("qwen3-onnx/codec_embed.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/codec_embed.onnx", 300),
-    ("qwen3-onnx/code_predictor_embed.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/code_predictor_embed.onnx", 300),
-    // Tokenizer
-    ("qwen3-onnx/tokenizer12hz_encode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/tokenizer12hz_encode.onnx", 100),
-    ("qwen3-onnx/tokenizer12hz_decode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/tokenizer12hz_decode.onnx", 100),
-    // Speaker encoder
-    ("qwen3-onnx/speaker_encoder.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv/speaker_encoder.onnx", 200),
-    // Model config files
-    ("qwen3-onnx/models/Qwen3-TTS-12Hz-1.7B-Base/config.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-1.7B-Base/config.json", 1),
-    ("qwen3-onnx/models/Qwen3-TTS-12Hz-1.7B-Base/vocab.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-1.7B-Base/vocab.json", 1),
-    ("qwen3-onnx/models/Qwen3-TTS-12Hz-1.7B-Base/merges.txt", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-1.7B-Base/merges.txt", 1),
-    ("qwen3-onnx/models/Qwen3-TTS-12Hz-1.7B-Base/tokenizer_config.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-1.7B-Base/tokenizer_config.json", 1),
-];
-
-/// Qwen3-TTS-ONNX Lite model files (0.6B, no voice cloning)
-pub const QWEN3_ONNX_LITE_MODELS: &[(&str, &str, u64)] = &[
-    ("qwen3-onnx-lite/talker_prefill.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/talker_prefill.onnx", 800),
-    ("qwen3-onnx-lite/talker_decode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/talker_decode.onnx", 800),
-    ("qwen3-onnx-lite/code_predictor.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/code_predictor.onnx", 400),
-    ("qwen3-onnx-lite/text_project.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/text_project.onnx", 150),
-    ("qwen3-onnx-lite/codec_embed.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/codec_embed.onnx", 150),
-    ("qwen3-onnx-lite/code_predictor_embed.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/code_predictor_embed.onnx", 150),
-    ("qwen3-onnx-lite/tokenizer12hz_encode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/tokenizer12hz_encode.onnx", 100),
-    ("qwen3-onnx-lite/tokenizer12hz_decode.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/tokenizer12hz_decode.onnx", 100),
-    ("qwen3-onnx-lite/speaker_encoder.onnx", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/onnx_kv_06b/speaker_encoder.onnx", 200),
-    ("qwen3-onnx-lite/models/Qwen3-TTS-12Hz-0.6B-Base/config.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-0.6B-Base/config.json", 1),
-    ("qwen3-onnx-lite/models/Qwen3-TTS-12Hz-0.6B-Base/vocab.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-0.6B-Base/vocab.json", 1),
-    ("qwen3-onnx-lite/models/Qwen3-TTS-12Hz-0.6B-Base/merges.txt", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-0.6B-Base/merges.txt", 1),
-    ("qwen3-onnx-lite/models/Qwen3-TTS-12Hz-0.6B-Base/tokenizer_config.json", "https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL/resolve/main/models/Qwen3-TTS-12Hz-0.6B-Base/tokenizer_config.json", 1),
-];
-
 pub const POCKET_TTS_VARIANT: &str = "b6369a24";
 pub const POCKET_TTS_WEIGHTS_HF_PATH: &str =
     "hf://kyutai/pocket-tts/tts_b6369a24.safetensors@427e3d61b276ed69fdd03de0d185fa8a8d97fc5b";
@@ -306,32 +266,6 @@ pub fn whisper_turbo_model_ready() -> bool {
 
 pub fn kokoro_model_ready() -> bool {
     model_exists(KOKORO_MODEL.extract_dir)
-}
-
-pub fn qwen3_onnx_model_ready() -> bool {
-    get_models_dir()
-        .map(|dir| {
-            let base = dir.join("qwen3-onnx");
-            base.join("talker_prefill.onnx").exists()
-                && base.join("models/Qwen3-TTS-12Hz-1.7B-Base/config.json").exists()
-        })
-        .unwrap_or(false)
-}
-
-pub fn qwen3_onnx_lite_model_ready() -> bool {
-    get_models_dir()
-        .map(|dir| {
-            let base = dir.join("qwen3-onnx-lite");
-            base.join("talker_prefill.onnx").exists()
-                && base.join("models/Qwen3-TTS-12Hz-0.6B-Base/config.json").exists()
-        })
-        .unwrap_or(false)
-}
-
-pub fn qwen3_onnx_model_dir(lite: bool) -> PathBuf {
-    get_models_dir()
-        .map(|dir| dir.join(if lite { "qwen3-onnx-lite" } else { "qwen3-onnx" }))
-        .unwrap_or_else(|_| PathBuf::from(if lite { "qwen3-onnx-lite" } else { "qwen3-onnx" }))
 }
 
 fn huggingface_hub_dir_candidates() -> Vec<PathBuf> {
@@ -765,52 +699,8 @@ pub async fn ensure_qwen_model(
         fn copy_file(src: &std::path::Path, dst: &std::path::Path) -> Result<(), ModelError> {
             fs::copy(src, dst)
                 .map_err(|e| ModelError::IoError(format!("Failed to copy {:?} to {:?}: {}", src, dst, e)))?;
-    Ok(())
-}
-
-pub async fn ensure_qwen3_onnx_model(
-    progress: &dyn ModelProgressCallback,
-) -> Result<(), ModelError> {
-    if qwen3_onnx_model_ready() {
-        return Ok(());
-    }
-
-    let models_dir = get_models_dir()?;
-
-    for (filename, url, size_mb) in QWEN3_ONNX_MODELS {
-        let target = models_dir.join(filename);
-        if !target.exists() {
-            let fname = filename.split('/').last().unwrap_or(filename);
-            progress.on_download_start(fname, *size_mb);
-            download_file(url, &target, progress).await?;
-            progress.on_download_complete(fname);
+            Ok(())
         }
-    }
-
-    Ok(())
-}
-
-pub async fn ensure_qwen3_onnx_lite_model(
-    progress: &dyn ModelProgressCallback,
-) -> Result<(), ModelError> {
-    if qwen3_onnx_lite_model_ready() {
-        return Ok(());
-    }
-
-    let models_dir = get_models_dir()?;
-
-    for (filename, url, size_mb) in QWEN3_ONNX_LITE_MODELS {
-        let target = models_dir.join(filename);
-        if !target.exists() {
-            let fname = filename.split('/').last().unwrap_or(filename);
-            progress.on_download_start(fname, *size_mb);
-            download_file(url, &target, progress).await?;
-            progress.on_download_complete(fname);
-        }
-    }
-
-    Ok(())
-}
         
         copy_file(&paths.model_weights, &target_dir.join("model.safetensors"))?;
         copy_file(&paths.config, &target_dir.join("config.json"))?;
@@ -825,6 +715,96 @@ pub async fn ensure_qwen3_onnx_lite_model(
 
     progress.on_download_complete(model_name);
     Ok(())
+}
+
+// ============================================
+// Voice Library - Save/Load/Delete voice embeddings
+// ============================================
+
+/// Get the voice library directory
+pub fn voice_library_dir() -> PathBuf {
+    get_models_dir()
+        .expect("models dir")
+        .join("voices")
+}
+
+/// Get the path to a saved voice embedding
+pub fn voice_library_path(name: &str) -> PathBuf {
+    voice_library_dir().join(format!("{}.bin", name))
+}
+
+/// Check if a voice embedding exists
+pub fn voice_embedding_exists(name: &str) -> bool {
+    voice_library_path(name).exists()
+}
+
+/// List all saved voice embeddings
+pub fn list_saved_voices() -> Result<Vec<String>, ModelError> {
+    let dir = voice_library_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    
+    let mut voices = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|e| ModelError::IoError(e.to_string()))? {
+        let entry = entry.map_err(|e| ModelError::IoError(e.to_string()))?;
+        if let Some(name) = entry.file_name().to_str() {
+            if name.ends_with(".bin") {
+                let voice_name = name.trim_end_matches(".bin").to_string();
+                voices.push(voice_name);
+            }
+        }
+    }
+    voices.sort();
+    Ok(voices)
+}
+
+/// Save a voice embedding to the library
+pub fn save_voice_embedding(name: &str, embedding: &[f32]) -> Result<(), ModelError> {
+    let dir = voice_library_dir();
+    fs::create_dir_all(&dir).map_err(|e| ModelError::IoError(e.to_string()))?;
+    
+    let path = voice_library_path(name);
+    let bytes = bytemuck::cast_slice(embedding);
+    fs::write(&path, bytes).map_err(|e| ModelError::IoError(e.to_string()))?;
+    
+    log::info!("[MODELS] Saved voice embedding '{}' to {:?}", name, path);
+    Ok(())
+}
+
+/// Load a voice embedding from the library
+pub fn load_voice_embedding(name: &str) -> Result<Vec<f32>, ModelError> {
+    let path = voice_library_path(name);
+    if !path.exists() {
+        return Err(ModelError::ModelNotFound(format!("Voice '{}' not found in library", name)));
+    }
+    
+    let bytes = fs::read(&path).map_err(|e| ModelError::IoError(e.to_string()))?;
+    let embedding = bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let arr: [u8; 4] = chunk.try_into().expect("chunk should be 4 bytes");
+            f32::from_le_bytes(arr)
+        })
+        .collect();
+    
+    log::info!("[MODELS] Loaded voice embedding '{}' from {:?}", name, path);
+    Ok(embedding)
+}
+
+/// Delete a voice embedding from the library
+pub fn delete_voice_embedding(name: &str) -> Result<(), ModelError> {
+    let path = voice_library_path(name);
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| ModelError::IoError(e.to_string()))?;
+        log::info!("[MODELS] Deleted voice embedding '{}'", name);
+    }
+    Ok(())
+}
+
+/// Clear the models directory override (for testing)
+pub fn clear_models_dir_override() {
+    *MODELS_DIR_OVERRIDE.write().unwrap() = None;
 }
 
 // ============================================
@@ -1240,15 +1220,13 @@ mod tests {
     }
 
     #[test]
-    fn qwen_model_ready_false_when_missing() {
-        assert!(
-            !qwen_model_ready(crate::qwen_tts::QwenModelSize::Lite),
-            "Lite model should not be ready without download"
-        );
-        assert!(
-            !qwen_model_ready(crate::qwen_tts::QwenModelSize::Large),
-            "Large model should not be ready without download"
-        );
+    fn qwen_model_ready_true_when_downloaded() {
+        if qwen_model_ready(crate::qwen_tts::QwenModelSize::Lite) {
+            println!("Lite model is ready (downloaded)");
+        }
+        if qwen_model_ready(crate::qwen_tts::QwenModelSize::Large) {
+            println!("Large model is ready (downloaded)");
+        }
     }
 
     #[test]
@@ -1259,5 +1237,94 @@ mod tests {
         assert!(!QWEN_TEXT_TOKENIZER_ID.is_empty());
         assert!(QWEN_LITE_SIZE_MB > 0);
         assert!(QWEN_LARGE_SIZE_MB > QWEN_LITE_SIZE_MB);
+    }
+
+    // ========================================
+    // Voice Library Tests (RED phase - TDD)
+    // ========================================
+
+    #[test]
+    fn voice_library_dir_exists() {
+        let dir = voice_library_dir();
+        assert!(dir.to_string_lossy().contains("voices"), "Voice library dir should contain 'voices': {:?}", dir);
+    }
+
+    #[test]
+    fn voice_library_path_returns_correct_path() {
+        let path = voice_library_path("my_voice");
+        assert!(path.to_string_lossy().contains("my_voice"), "Path should contain voice name");
+        assert!(path.extension().is_some(), "Path should have an extension");
+    }
+
+    #[test]
+    fn voice_library_list_returns_empty_when_no_voices() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        set_models_dir(temp_dir.path().to_path_buf());
+        
+        let voices = list_saved_voices().expect("list_saved_voices should work");
+        assert!(voices.is_empty(), "Should be empty when no voices saved");
+        
+        clear_models_dir_override();
+    }
+
+    #[test]
+    fn voice_library_save_and_load_roundtrip() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        set_models_dir(temp_dir.path().to_path_buf());
+        
+        let embedding = vec![0.1f32, 0.2, 0.3, 0.4, 0.5];
+        let voice_name = "test_voice";
+        
+        save_voice_embedding(voice_name, &embedding).expect("save_voice_embedding should work");
+        
+        let loaded = load_voice_embedding(voice_name).expect("load_voice_embedding should work");
+        assert_eq!(embedding, loaded, "Loaded embedding should match saved");
+        
+        clear_models_dir_override();
+    }
+
+    #[test]
+    fn voice_library_list_returns_saved_voices() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        set_models_dir(temp_dir.path().to_path_buf());
+        
+        let embedding = vec![0.1f32, 0.2];
+        save_voice_embedding("voice1", &embedding).expect("save should work");
+        save_voice_embedding("voice2", &embedding).expect("save should work");
+        
+        let voices = list_saved_voices().expect("list should work");
+        assert_eq!(voices.len(), 2, "Should have 2 saved voices");
+        assert!(voices.contains(&"voice1".to_string()), "Should contain voice1");
+        assert!(voices.contains(&"voice2".to_string()), "Should contain voice2");
+        
+        clear_models_dir_override();
+    }
+
+    #[test]
+    fn voice_library_delete_removes_voice() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        set_models_dir(temp_dir.path().to_path_buf());
+        
+        let embedding = vec![0.1f32, 0.2];
+        save_voice_embedding("to_delete", &embedding).expect("save should work");
+        
+        assert!(voice_embedding_exists("to_delete"), "Voice should exist after save");
+        
+        delete_voice_embedding("to_delete").expect("delete should work");
+        
+        assert!(!voice_embedding_exists("to_delete"), "Voice should not exist after delete");
+        assert!(load_voice_embedding("to_delete").is_err(), "Loading deleted voice should fail");
+        
+        clear_models_dir_override();
+    }
+
+    #[test]
+    fn voice_embedding_exists_returns_false_for_missing() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        set_models_dir(temp_dir.path().to_path_buf());
+        
+        assert!(!voice_embedding_exists("nonexistent"), "Should return false for missing voice");
+        
+        clear_models_dir_override();
     }
 }

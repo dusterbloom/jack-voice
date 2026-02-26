@@ -24,8 +24,8 @@ pocket-tts = "0.6.2"
 # Qwen3 TTS (multilingual with voice cloning)
 qwen3-tts = { path = "../../qwen3-tts-rs", default-features = false, features = ["hub"] }
 
-# Candle core for GPU detection (used by qwen3-tts)
-candle-core = { version = "0.9", optional = true }
+# Candle core for GPU detection and tensor operations
+candle-core = { version = "0.9" }
 
 # Parakeet STT (multilingual)
 parakeet-rs = { version = "0.3", default-features = false }
@@ -74,15 +74,16 @@ lazy_static = "1.4"
 # Parking lot mutexes
 parking_lot = "0.12"
 
-# Regex for tokenization
-regex = "1"
+# Safe byte casting
+bytemuck = "1"
 
 [features]
 default = ["download-binaries"]
 download-binaries = ["sherpa-rs/download-binaries"]
-cuda = ["kokoro-tiny/cuda", "parakeet-rs/cuda", "qwen3-tts/cuda", "dep:candle-core"]
+cuda = ["kokoro-tiny/cuda", "parakeet-rs/cuda", "qwen3-tts/cuda"]
 directml = ["parakeet-rs/directml"]
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
+tempfile = "3"

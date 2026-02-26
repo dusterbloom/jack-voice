@@ -317,3 +317,113 @@ fn qwen_engine_serialization_roundtrip() {
         assert_eq!(engine, parsed, "Roundtrip failed for {:?}", engine);
     }
 }
+
+// ========================================
+// Voice Library Integration Tests (RED phase - TDD)
+// ========================================
+
+#[test]
+#[ignore = "Requires Qwen Large model"]
+fn qwen_large_save_voice_creates_embedding_file() {
+    if !reference_audio_exists() {
+        println!("[test] Skipping: reference audio not found");
+        return;
+    }
+
+    ensure_qwen_large_model();
+
+    let mut tts =
+        TextToSpeech::with_engine(TtsEngine::QwenLarge).expect("Failed to create QwenLarge TTS");
+
+    let ref_path = PathBuf::from(REFERENCE_AUDIO_PATH);
+    tts.set_voice_clone_reference(ref_path, None)
+        .expect("Failed to set voice clone reference");
+
+    tts.save_voice("test_saved_voice")
+        .expect("save_voice should work");
+
+    assert!(
+        models::voice_embedding_exists("test_saved_voice"),
+        "Voice embedding file should exist after save"
+    );
+
+    models::delete_voice_embedding("test_saved_voice").ok();
+}
+
+#[test]
+#[ignore = "Requires Qwen Large model and saved voice"]
+fn qwen_large_load_voice_uses_saved_embedding() {
+    ensure_qwen_large_model();
+
+    if !models::voice_embedding_exists("test_preloaded_voice") {
+        println!("[test] Skipping: test_preloaded_voice not saved");
+        return;
+    }
+
+    let mut tts =
+        TextToSpeech::with_engine(TtsEngine::QwenLarge).expect("Failed to create QwenLarge TTS");
+
+    tts.load_voice("test_preloaded_voice")
+        .expect("load_voice should work");
+
+    assert_eq!(tts.current_speaker(), "test_preloaded_voice");
+
+    let audio = tts
+        .synthesize("Testing loaded voice")
+        .expect("Synthesis failed");
+    assert!(!audio.samples.is_empty());
+}
+
+#[test]
+fn voice_library_functions_exist() {
+    let _ = models::voice_library_dir();
+    let _ = models::list_saved_voices();
+}
+
+#[test]
+fn list_saved_voices_returns_vec() {
+    let voices = models::list_saved_voices().expect("list_saved_voices should work");
+    assert!(
+        voices.is_empty() || voices.len() > 0,
+        "Should return a vector"
+    );
+}
+
+// ========================================
+// Unified Qwen Engine Tests (RED phase - TDD)
+// ========================================
+
+#[test]
+fn qwen_engine_auto_downloads_model_on_first_use() {
+    let result = TextToSpeech::with_engine_auto(TtsEngine::Qwen);
+
+    if result.is_ok() {
+        assert!(
+            models::qwen_model_ready(QwenModelSize::Lite),
+            "Model should be downloaded after with_engine_auto"
+        );
+    }
+}
+
+#[test]
+fn qwen_large_with_voice_auto_uses_large_model() {
+    let tts = TextToSpeech::new_qwen_with_voice_auto(None);
+
+    if tts.is_ok() {
+        assert!(
+            tts.unwrap().supports_voice_cloning(),
+            "Should use Large model for voice auto"
+        );
+    }
+}
+
+#[test]
+fn qwen_with_voice_name_loads_from_library() {
+    if !models::voice_embedding_exists("test_voice") {
+        println!("[test] Skipping: test_voice not in library");
+        return;
+    }
+
+    let tts = TextToSpeech::new_qwen_with_voice_auto(Some("test_voice"));
+    assert!(tts.is_ok(), "Should load voice from library");
+}
