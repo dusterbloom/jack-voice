@@ -81,6 +81,7 @@ bytemuck = "1"
 default = ["download-binaries"]
 download-binaries = ["sherpa-rs/download-binaries"]
 cuda = ["kokoro-tiny/cuda", "parakeet-rs/cuda", "qwen3-tts/cuda"]
+metal = ["candle-core/metal", "qwen3-tts/metal", "pocket-tts/metal"]
 directml = ["parakeet-rs/directml"]
 
 [dev-dependencies]

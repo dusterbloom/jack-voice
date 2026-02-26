@@ -338,50 +338,90 @@ mod tests {
         );
     }
 
-    #[test]
-    fn can_run_qwen_returns_bool() {
-        let result = TextToSpeech::can_run_qwen();
-        assert!(result == true || result == false, "Should return a boolean");
-    }
-
     // ========================================
-    // Unified Qwen Engine Tests (RED phase - TDD)
+    // Unified Qwen Engine Tests
     // ========================================
 
     #[test]
-    fn with_engine_auto_exists() {
-        let _ = TextToSpeech::with_engine_auto(TtsEngine::Qwen);
+    fn with_engine_auto_returns_error_when_model_missing() {
+        // Qwen models are large and won't be present in CI/test environments.
+        // with_engine_auto should return a clear ModelNotFound error, not panic.
+        let result = TextToSpeech::with_engine_auto(TtsEngine::Qwen);
+        if let Err(e) = result {
+            match e {
+                TtsError::ModelNotFound(_) | TtsError::InitError(_) => {}
+                other => panic!("Expected ModelNotFound or InitError, got: {:?}", other),
+            }
+        }
+        // If it succeeds (model is actually present), that's fine too.
     }
 
     #[test]
-    fn new_qwen_with_voice_auto_exists() {
-        let _ = TextToSpeech::new_qwen_with_voice_auto(None);
-    }
-
-    #[test]
-    fn save_voice_exists() {
-        let tts = TextToSpeech::with_engine(TtsEngine::QwenLarge);
-        if let Ok(mut tts) = tts {
-            let _ = tts.save_voice("test");
+    fn new_qwen_with_voice_auto_handles_missing_model() {
+        let result = TextToSpeech::new_qwen_with_voice_auto(None);
+        if let Err(e) = result {
+            match e {
+                TtsError::ModelNotFound(_) | TtsError::InitError(_) => {}
+                other => panic!("Expected ModelNotFound or InitError, got: {:?}", other),
+            }
         }
     }
 
     #[test]
-    fn load_voice_exists() {
-        let tts = TextToSpeech::with_engine(TtsEngine::QwenLarge);
-        if let Ok(mut tts) = tts {
-            let _ = tts.load_voice("test");
+    fn new_qwen_with_voice_auto_saved_voice_falls_back() {
+        // Asking for a saved voice that doesn't exist should try Qwen preset
+        let result = TextToSpeech::new_qwen_with_voice_auto(Some("nonexistent_voice_xyz"));
+        if let Err(e) = result {
+            // Should fail with model not found (model not downloaded), not a crash
+            match e {
+                TtsError::ModelNotFound(_) | TtsError::InitError(_) => {}
+                other => panic!("Expected ModelNotFound or InitError, got: {:?}", other),
+            }
         }
     }
 
     #[test]
-    fn list_saved_voices_on_tts_exists() {
-        let _ = TextToSpeech::list_saved_voices();
+    fn list_saved_voices_returns_vec() {
+        // Should always return Ok even if the directory doesn't exist yet
+        let result = TextToSpeech::list_saved_voices();
+        assert!(result.is_ok(), "list_saved_voices should not panic: {:?}", result.err());
     }
 
     #[test]
-    fn delete_saved_voice_exists() {
-        let _ = TextToSpeech::delete_saved_voice("test");
+    fn delete_saved_voice_nonexistent_succeeds() {
+        // Deleting a voice that doesn't exist should succeed silently
+        let result = TextToSpeech::delete_saved_voice("definitely_not_a_real_voice_12345");
+        assert!(result.is_ok(), "Deleting nonexistent voice should succeed: {:?}", result.err());
+    }
+
+    #[test]
+    fn save_voice_requires_qwen_large_engine() {
+        // Pocket engine should refuse save_voice
+        let result = TextToSpeech::with_engine(TtsEngine::Pocket);
+        if let Ok(mut tts) = result {
+            let err = tts.save_voice("test").expect_err("save_voice should fail on Pocket engine");
+            match err {
+                TtsError::InitError(msg) => {
+                    assert!(msg.contains("QwenLarge"), "Error should mention QwenLarge: {}", msg);
+                }
+                other => panic!("Expected InitError, got: {:?}", other),
+            }
+        }
+        // If Pocket can't load (no model), that's fine — skip
+    }
+
+    #[test]
+    fn load_voice_requires_qwen_large_engine() {
+        let result = TextToSpeech::with_engine(TtsEngine::Pocket);
+        if let Ok(mut tts) = result {
+            let err = tts.load_voice("test").expect_err("load_voice should fail on Pocket engine");
+            match err {
+                TtsError::InitError(msg) => {
+                    assert!(msg.contains("QwenLarge"), "Error should mention QwenLarge: {}", msg);
+                }
+                other => panic!("Expected InitError, got: {:?}", other),
+            }
+        }
     }
 }
 

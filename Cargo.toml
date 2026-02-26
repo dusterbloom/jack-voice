@@ -6,6 +6,9 @@ resolver = "2"
 edition = "2021"
 version = "0.1.0"
 
+[patch.crates-io]
+pocket-tts = { path = "../pocket-tts/crates/pocket-tts" }
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

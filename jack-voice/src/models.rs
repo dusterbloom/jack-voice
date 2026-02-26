@@ -1240,91 +1240,104 @@ mod tests {
     }
 
     // ========================================
-    // Voice Library Tests (RED phase - TDD)
+    // Voice Library Tests
     // ========================================
+    //
+    // These tests share a global MODELS_DIR_OVERRIDE, so they must run
+    // under a lock to avoid races when cargo test runs them in parallel.
+
+    use std::sync::Mutex;
+    static VOICE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that sets the models dir override and restores it on drop.
+    struct ModelsDirGuard {
+        _temp: tempfile::TempDir,
+    }
+
+    impl ModelsDirGuard {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().expect("Failed to create temp dir");
+            set_models_dir(temp.path().to_path_buf());
+            Self { _temp: temp }
+        }
+    }
+
+    impl Drop for ModelsDirGuard {
+        fn drop(&mut self) {
+            clear_models_dir_override();
+        }
+    }
 
     #[test]
-    fn voice_library_dir_exists() {
+    fn voice_library_dir_contains_voices_segment() {
         let dir = voice_library_dir();
-        assert!(dir.to_string_lossy().contains("voices"), "Voice library dir should contain 'voices': {:?}", dir);
+        assert!(dir.to_string_lossy().contains("voices"), "Path should contain 'voices': {:?}", dir);
     }
 
     #[test]
-    fn voice_library_path_returns_correct_path() {
+    fn voice_library_path_includes_name_and_extension() {
         let path = voice_library_path("my_voice");
-        assert!(path.to_string_lossy().contains("my_voice"), "Path should contain voice name");
-        assert!(path.extension().is_some(), "Path should have an extension");
+        assert!(path.to_string_lossy().ends_with("my_voice.bin"), "Path should end with name.bin: {:?}", path);
     }
 
     #[test]
-    fn voice_library_list_returns_empty_when_no_voices() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        set_models_dir(temp_dir.path().to_path_buf());
-        
+    fn voice_library_list_empty_when_no_voices_saved() {
+        let _lock = VOICE_TEST_LOCK.lock().unwrap();
+        let _guard = ModelsDirGuard::new();
+
         let voices = list_saved_voices().expect("list_saved_voices should work");
-        assert!(voices.is_empty(), "Should be empty when no voices saved");
-        
-        clear_models_dir_override();
+        assert!(voices.is_empty(), "Fresh dir should have no voices");
     }
 
     #[test]
-    fn voice_library_save_and_load_roundtrip() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        set_models_dir(temp_dir.path().to_path_buf());
-        
-        let embedding = vec![0.1f32, 0.2, 0.3, 0.4, 0.5];
-        let voice_name = "test_voice";
-        
-        save_voice_embedding(voice_name, &embedding).expect("save_voice_embedding should work");
-        
-        let loaded = load_voice_embedding(voice_name).expect("load_voice_embedding should work");
-        assert_eq!(embedding, loaded, "Loaded embedding should match saved");
-        
-        clear_models_dir_override();
+    fn voice_library_save_load_roundtrip_preserves_data() {
+        let _lock = VOICE_TEST_LOCK.lock().unwrap();
+        let _guard = ModelsDirGuard::new();
+
+        let embedding = vec![0.1f32, 0.2, 0.3, -1.5, 0.0];
+        save_voice_embedding("roundtrip", &embedding).expect("save should work");
+
+        let loaded = load_voice_embedding("roundtrip").expect("load should work");
+        assert_eq!(embedding, loaded, "Loaded embedding should match saved data exactly");
     }
 
     #[test]
-    fn voice_library_list_returns_saved_voices() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        set_models_dir(temp_dir.path().to_path_buf());
-        
+    fn voice_library_list_returns_exactly_saved_voices() {
+        let _lock = VOICE_TEST_LOCK.lock().unwrap();
+        let _guard = ModelsDirGuard::new();
+
         let embedding = vec![0.1f32, 0.2];
-        save_voice_embedding("voice1", &embedding).expect("save should work");
-        save_voice_embedding("voice2", &embedding).expect("save should work");
-        
+        save_voice_embedding("voice_a", &embedding).expect("save should work");
+        save_voice_embedding("voice_b", &embedding).expect("save should work");
+
         let voices = list_saved_voices().expect("list should work");
-        assert_eq!(voices.len(), 2, "Should have 2 saved voices");
-        assert!(voices.contains(&"voice1".to_string()), "Should contain voice1");
-        assert!(voices.contains(&"voice2".to_string()), "Should contain voice2");
-        
-        clear_models_dir_override();
+        assert_eq!(voices.len(), 2, "Should have exactly 2 saved voices, got: {:?}", voices);
+        assert!(voices.contains(&"voice_a".to_string()));
+        assert!(voices.contains(&"voice_b".to_string()));
     }
 
     #[test]
-    fn voice_library_delete_removes_voice() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        set_models_dir(temp_dir.path().to_path_buf());
-        
+    fn voice_library_delete_removes_and_prevents_load() {
+        let _lock = VOICE_TEST_LOCK.lock().unwrap();
+        let _guard = ModelsDirGuard::new();
+
         let embedding = vec![0.1f32, 0.2];
         save_voice_embedding("to_delete", &embedding).expect("save should work");
-        
         assert!(voice_embedding_exists("to_delete"), "Voice should exist after save");
-        
+
         delete_voice_embedding("to_delete").expect("delete should work");
-        
         assert!(!voice_embedding_exists("to_delete"), "Voice should not exist after delete");
         assert!(load_voice_embedding("to_delete").is_err(), "Loading deleted voice should fail");
-        
-        clear_models_dir_override();
+
+        let voices = list_saved_voices().expect("list should work");
+        assert!(voices.is_empty(), "List should be empty after deleting the only voice");
     }
 
     #[test]
-    fn voice_embedding_exists_returns_false_for_missing() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        set_models_dir(temp_dir.path().to_path_buf());
-        
-        assert!(!voice_embedding_exists("nonexistent"), "Should return false for missing voice");
-        
-        clear_models_dir_override();
+    fn voice_embedding_exists_false_for_missing() {
+        let _lock = VOICE_TEST_LOCK.lock().unwrap();
+        let _guard = ModelsDirGuard::new();
+
+        assert!(!voice_embedding_exists("nonexistent"));
     }
 }

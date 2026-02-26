@@ -381,14 +381,19 @@ pub fn can_run_qwen() -> bool {
     {
         if let Ok(device) = candle_core::Device::cuda_if_available(0) {
             if device.is_cuda() {
-                log::debug!("[QwenTTS] CUDA available, Qwen can run");
+                log::debug!("[QwenTTS] CUDA available, Qwen can run (GPU accelerated)");
                 return true;
             }
         }
     }
 
-    log::debug!("[QwenTTS] No GPU available, Qwen requires GPU for real-time synthesis");
-    false
+    // qwen3-tts auto_device() handles Metal/CPU selection at runtime.
+    // CPU inference works but is slower than real-time for long utterances.
+    // Metal acceleration requires building with --features metal (currently
+    // blocked by pocket-tts pinning once_cell ~1.19 vs candle-metal-kernels
+    // needing >=1.21).
+    log::debug!("[QwenTTS] Qwen will use CPU (functional but slower than GPU)");
+    true
 }
 
 #[cfg(test)]
