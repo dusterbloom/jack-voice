@@ -35,6 +35,8 @@ pub enum TtsEngine {
     Kokoro,
     Qwen,
     QwenLarge,
+    QwenOnnx,
+    QwenOnnxInt8,
 }
 
 /// Internal TTS implementation
@@ -44,6 +46,8 @@ enum TtsImpl {
     Kokoro(KokoroTts),
     Qwen(QwenTts),
     QwenLarge(QwenTts),
+    QwenOnnx(crate::qwen_onnx_tts::QwenOnnxTts),
+    QwenOnnxInt8(crate::qwen_onnx_tts::QwenOnnxTts),
 }
 
 struct PocketTts {
@@ -345,6 +349,63 @@ mod tests {
     }
 
     // ========================================
+    // Qwen ONNX Engine Tests
+    // ========================================
+
+    #[test]
+    fn tts_engine_serializes_qwen_onnx_variants() {
+        let qwen_onnx = TtsEngine::QwenOnnx;
+        let qwen_onnx_int8 = TtsEngine::QwenOnnxInt8;
+
+        let qwen_onnx_json = serde_json::to_string(&qwen_onnx).expect("QwenOnnx should serialize");
+        let qwen_onnx_int8_json =
+            serde_json::to_string(&qwen_onnx_int8).expect("QwenOnnxInt8 should serialize");
+
+        assert!(
+            qwen_onnx_json.contains("QwenOnnx"),
+            "QwenOnnx JSON should contain 'QwenOnnx': {}",
+            qwen_onnx_json
+        );
+        assert!(
+            qwen_onnx_int8_json.contains("QwenOnnxInt8"),
+            "QwenOnnxInt8 JSON should contain 'QwenOnnxInt8': {}",
+            qwen_onnx_int8_json
+        );
+    }
+
+    #[test]
+    fn tts_engine_deserializes_qwen_onnx_variants() {
+        let qwen_onnx: TtsEngine =
+            serde_json::from_str("\"QwenOnnx\"").expect("Should deserialize QwenOnnx");
+        let qwen_onnx_int8: TtsEngine =
+            serde_json::from_str("\"QwenOnnxInt8\"").expect("Should deserialize QwenOnnxInt8");
+
+        assert_eq!(qwen_onnx, TtsEngine::QwenOnnx);
+        assert_eq!(qwen_onnx_int8, TtsEngine::QwenOnnxInt8);
+    }
+
+    #[test]
+    fn tts_engine_all_variants_distinct() {
+        let engines = vec![
+            TtsEngine::Pocket,
+            TtsEngine::Supertonic,
+            TtsEngine::Kokoro,
+            TtsEngine::Qwen,
+            TtsEngine::QwenLarge,
+            TtsEngine::QwenOnnx,
+            TtsEngine::QwenOnnxInt8,
+        ];
+        // All should be distinct
+        for (i, e1) in engines.iter().enumerate() {
+            for (j, e2) in engines.iter().enumerate() {
+                if i != j {
+                    assert_ne!(e1, e2, "Engine variants should be distinct");
+                }
+            }
+        }
+    }
+
+    // ========================================
     // Unified Qwen Engine Tests (RED phase - TDD)
     // ========================================
 
@@ -406,6 +467,8 @@ impl TextToSpeech {
             TtsEngine::Kokoro => Self::new_kokoro(),
             TtsEngine::Qwen => Self::new_qwen(),
             TtsEngine::QwenLarge => Self::new_qwen_large(),
+            TtsEngine::QwenOnnx => Self::new_qwen_onnx(false),
+            TtsEngine::QwenOnnxInt8 => Self::new_qwen_onnx(true),
         }
     }
 
@@ -538,6 +601,55 @@ impl TextToSpeech {
         })
     }
 
+    /// Create Qwen ONNX TTS instance (cross-platform via ONNX Runtime)
+    pub fn new_qwen_onnx(use_int8: bool) -> Result<Self, TtsError> {
+        Self::new_qwen_onnx_with_voice("ryan", use_int8)
+    }
+
+    /// Create Qwen ONNX TTS instance with specific voice
+    pub fn new_qwen_onnx_with_voice(voice_id: &str, use_int8: bool) -> Result<Self, TtsError> {
+        let model_dir = models::qwen_onnx_model_dir(use_int8);
+
+        if !models::qwen_onnx_model_ready(use_int8) {
+            return Err(TtsError::ModelNotFound(format!(
+                "Qwen ONNX {} model not downloaded. Run model download first.",
+                if use_int8 { "INT8" } else { "FP16" }
+            )));
+        }
+
+        let variant = if use_int8 {
+            crate::qwen_onnx_tts::OnnxModelVariant::Int8
+        } else {
+            crate::qwen_onnx_tts::OnnxModelVariant::Fp16
+        };
+
+        log::info!(
+            "[TTS] Initializing Qwen ONNX {:?} with voice {}",
+            variant,
+            voice_id
+        );
+
+        let mut qwen_onnx = crate::qwen_onnx_tts::QwenOnnxTts::new(&model_dir, variant)
+            .map_err(|e| TtsError::InitError(format!("Qwen ONNX init failed: {}", e)))?;
+
+        qwen_onnx
+            .set_speaker(voice_id)
+            .map_err(|e| TtsError::InitError(format!("Qwen ONNX voice set failed: {}", e)))?;
+
+        let engine_impl = if use_int8 {
+            TtsImpl::QwenOnnxInt8(qwen_onnx)
+        } else {
+            TtsImpl::QwenOnnx(qwen_onnx)
+        };
+
+        Ok(Self {
+            engine: engine_impl,
+            speaker_id: voice_id.to_string(),
+            speed: 1.0,
+            sample_rate: 24000,
+        })
+    }
+
     /// Create TTS with specific Supertonic model paths
     pub fn with_supertonic_paths(paths: &models::SupertonicPaths) -> Result<Self, TtsError> {
         // Verify required model files exist
@@ -647,6 +759,12 @@ impl TextToSpeech {
                     "QwenLarge requires voice cloning, not preset speakers".to_string(),
                 ))
             }
+            TtsImpl::QwenOnnx(tts) | TtsImpl::QwenOnnxInt8(tts) => {
+                tts.set_speaker(speaker_id)?;
+                self.speaker_id = speaker_id.to_string();
+                log::info!("[TTS] Set Qwen ONNX voice to {}", speaker_id);
+                Ok(())
+            }
         }
     }
 
@@ -697,6 +815,18 @@ impl TextToSpeech {
                 log::warn!("[TTS] QwenLarge uses voice cloning, not numeric speaker IDs");
                 return;
             }
+            TtsImpl::QwenOnnx(_) | TtsImpl::QwenOnnxInt8(_) => match id {
+                0 => "ryan",
+                1 => "serena",
+                2 => "vivian",
+                3 => "aiden",
+                4 => "uncle_fu",
+                5 => "ono_anna",
+                6 => "sohee",
+                7 => "eric",
+                8 => "dylan",
+                _ => "ryan",
+            },
         };
 
         if let Err(e) = self.set_speaker(voice) {
@@ -718,6 +848,9 @@ impl TextToSpeech {
             }
             TtsImpl::Qwen(_) | TtsImpl::QwenLarge(_) => {
                 // Qwen uses fixed synthesis options
+            }
+            TtsImpl::QwenOnnx(_) | TtsImpl::QwenOnnxInt8(_) => {
+                // Qwen ONNX uses fixed synthesis options
             }
         }
     }
@@ -756,6 +889,16 @@ impl TextToSpeech {
             }
             TtsImpl::Qwen(qwen) | TtsImpl::QwenLarge(qwen) => {
                 let audio = qwen
+                    .synthesize(text)
+                    .map_err(|e| TtsError::SynthesisError(e.to_string()))?;
+
+                Ok(AudioOutput {
+                    samples: audio.samples,
+                    sample_rate: audio.sample_rate,
+                })
+            }
+            TtsImpl::QwenOnnx(tts) | TtsImpl::QwenOnnxInt8(tts) => {
+                let audio = tts
                     .synthesize(text)
                     .map_err(|e| TtsError::SynthesisError(e.to_string()))?;
 
@@ -811,6 +954,8 @@ impl TextToSpeech {
             TtsImpl::Kokoro(_) => "kokoro",
             TtsImpl::Qwen(_) => "qwen",
             TtsImpl::QwenLarge(_) => "qwen-large",
+            TtsImpl::QwenOnnx(_) => "qwen-onnx",
+            TtsImpl::QwenOnnxInt8(_) => "qwen-onnx-int8",
         }
     }
 
@@ -1090,6 +1235,16 @@ impl From<crate::qwen_tts::TtsError> for TtsError {
             crate::qwen_tts::TtsError::ModelNotFound(msg) => TtsError::ModelNotFound(msg),
             crate::qwen_tts::TtsError::InitError(msg) => TtsError::InitError(msg),
             crate::qwen_tts::TtsError::SynthesisError(msg) => TtsError::SynthesisError(msg),
+        }
+    }
+}
+
+impl From<crate::qwen_onnx_tts::TtsError> for TtsError {
+    fn from(e: crate::qwen_onnx_tts::TtsError) -> Self {
+        match e {
+            crate::qwen_onnx_tts::TtsError::ModelNotFound(msg) => TtsError::ModelNotFound(msg),
+            crate::qwen_onnx_tts::TtsError::InitError(msg) => TtsError::InitError(msg),
+            crate::qwen_onnx_tts::TtsError::SynthesisError(msg) => TtsError::SynthesisError(msg),
         }
     }
 }
