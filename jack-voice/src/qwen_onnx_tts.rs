@@ -206,10 +206,46 @@ impl QwenOnnxTts {
     }
 
     /// Synthesize text to audio
+    ///
+    /// # Implementation Status
+    ///
+    /// This is a placeholder implementation. Full synthesis requires:
+    ///
+    /// 1. **Text Tokenization**: BPE tokenizer (vocab.json + merges.txt)
+    /// 2. **Talker Prefill**: Run `talker_prefill.onnx` with text embeddings
+    /// 3. **Talker Decode Loop**: Run `talker_decode.onnx` autoregressively
+    /// 4. **Code Predictor**: For each talker step, run `code_predictor.onnx` to generate
+    ///    31 additional codebook tokens
+    /// 5. **Vocoder**: Run `vocoder.onnx` to convert codes to audio
+    ///
+    /// See: https://huggingface.co/elbruno/Qwen3-TTS-12Hz-0.6B-CustomVoice-ONNX
+    ///
+    /// # TODO
+    ///
+    /// - Implement BPE tokenizer (or use tokenizers crate)
+    /// - Implement embedding lookups (text + codec)
+    /// - Implement KV cache management for decode loop
+    /// - Implement vocoder decode
     pub fn synthesize(&self, text: &str) -> Result<AudioOutput, TtsError> {
-        // TODO: Implement actual synthesis
-        // For now, return empty audio
-        log::warn!("[QwenOnnx] Synthesis not yet implemented, returning empty audio");
+        if text.trim().is_empty() {
+            return Ok(AudioOutput {
+                samples: vec![],
+                sample_rate: self.sample_rate,
+            });
+        }
+
+        log::info!(
+            "[QwenOnnx] Synthesis requested for: '{}' ({} chars)",
+            text.chars().take(50).collect::<String>(),
+            text.len()
+        );
+        log::warn!("[QwenOnnx] Synthesis not yet implemented");
+        log::info!(
+            "[QwenOnnx] Required models: talker_prefill.onnx, talker_decode.onnx, \
+             code_predictor.onnx, vocoder.onnx, embeddings/, tokenizer/"
+        );
+
+        // Return empty audio for now
         Ok(AudioOutput {
             samples: vec![],
             sample_rate: self.sample_rate,
@@ -217,13 +253,25 @@ impl QwenOnnxTts {
     }
 
     /// Synthesize text with streaming callback
-    pub fn synthesize_streaming<F>(&self, text: &str, mut on_chunk: F) -> Result<u32, TtsError>
+    ///
+    /// # Implementation Status
+    ///
+    /// This is a placeholder implementation. See [`synthesize`](Self::synthesize) for details.
+    pub fn synthesize_streaming<F>(&self, text: &str, _on_chunk: F) -> Result<u32, TtsError>
     where
         F: FnMut(&[f32], u32) -> bool,
     {
-        // TODO: Implement actual streaming synthesis
+        if text.trim().is_empty() {
+            return Ok(self.sample_rate);
+        }
+
+        log::info!(
+            "[QwenOnnx] Streaming synthesis requested for: '{}' ({} chars)",
+            text.chars().take(50).collect::<String>(),
+            text.len()
+        );
         log::warn!("[QwenOnnx] Streaming synthesis not yet implemented");
-        // Return success with sample rate
+
         Ok(self.sample_rate)
     }
 
@@ -372,5 +420,66 @@ mod tests {
         let fp16_type = "qwen-onnx";
         let int8_type = "qwen-onnx-int8";
         assert_ne!(fp16_type, int8_type);
+    }
+
+    /// Documentation test for synthesis pipeline architecture.
+    /// This documents the expected ONNX model I/O for future implementers.
+    #[test]
+    fn test_synthesis_pipeline_documentation() {
+        // This test documents the expected ONNX synthesis pipeline.
+        //
+        // SYNTHESIS PIPELINE:
+        //
+        // 1. TEXT TOKENIZATION (BPE Tokenizer)
+        //    Input:  text string (e.g., "Hello world")
+        //    Output: input_ids: Vec<i64> (token IDs)
+        //    Files:  tokenizer/vocab.json, tokenizer/merges.txt
+        //
+        // 2. TALKER PREFILL (talker_prefill.onnx)
+        //    Inputs:
+        //      - input_ids: (1, T_text) int64
+        //      - speaker_id: int64 (0-8 for preset voices)
+        //    Outputs:
+        //      - logits: (1, 1, 3072) float32  -- first token prediction
+        //      - hidden_states: (1, T, 1024) float32  -- for code predictor
+        //      - kv_cache: (28, 1, 8, T, 128) float32  -- KV cache per layer
+        //
+        // 3. TALKER DECODE LOOP (talker_decode.onnx)
+        //    For each generated token until EOS:
+        //    Inputs:
+        //      - input_ids: (1, 1) int64  -- previous token
+        //      - kv_cache: from previous step
+        //    Outputs:
+        //      - logits: (1, 1, 3072) float32
+        //      - hidden_states: (1, 1, 1024) float32
+        //      - kv_cache: updated cache
+        //
+        // 4. CODE PREDICTOR (code_predictor.onnx)
+        //    For each talker step, runs 31 times:
+        //    Inputs:
+        //      - talker_hidden: (1, 1, 1024) float32
+        //      - group_0_embed: (1, 1, 1024) float32
+        //      - generation_step: int64 (1-31)
+        //    Outputs:
+        //      - logits: (1, 1, 2048) float32  -- predicted codebook token
+        //
+        // 5. VOCODER (vocoder.onnx)
+        //    Input:
+        //      - codes: (1, 16, T_frames) int64  -- 16 codebooks, T timesteps
+        //    Output:
+        //      - waveform: (1, num_samples) float32  -- 24kHz audio
+        //
+        // MODEL FILES NEEDED:
+        //   - talker_prefill.onnx + .data (~1.7 GB)
+        //   - talker_decode.onnx + .data (~1.7 GB)
+        //   - code_predictor.onnx (~420 MB)
+        //   - vocoder.onnx + .data (~437 MB)
+        //   - embeddings/*.npy (~1.4 GB)
+        //   - tokenizer/vocab.json, merges.txt (~4 MB)
+        //
+        // Total: ~5.3 GB for FP16, ~1.6 GB for INT8
+
+        // This test always passes - it's just documentation
+        assert!(true);
     }
 }
