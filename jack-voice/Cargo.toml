@@ -41,6 +41,12 @@ rubato = "0.15"
 ndarray = "0.16"
 ndarray-npy = "0.9.1"
 
+# BPE tokenization for Qwen ONNX
+tokenizers = "0.19"
+
+# Random sampling for token generation
+rand = "0.8"
+
 # Archive extraction for model downloads
 bzip2 = "0.5"
 tar = "0.4"

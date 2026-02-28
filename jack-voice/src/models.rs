@@ -718,6 +718,126 @@ pub async fn ensure_qwen_model(
 }
 
 // ============================================
+// Qwen ONNX Model Management
+// ============================================
+
+/// HuggingFace model IDs for Qwen ONNX
+pub const QWEN_ONNX_INT8_MODEL_ID: &str = "sivasub987/Qwen3-TTS-0.6B-ONNX-INT8";
+pub const QWEN_ONNX_FP16_MODEL_ID: &str = "elbruno/Qwen3-TTS-12Hz-0.6B-CustomVoice-ONNX";
+pub const QWEN_ONNX_INT8_SIZE_MB: u64 = 1600;
+pub const QWEN_ONNX_FP16_SIZE_MB: u64 = 5300;
+
+/// Get the Qwen ONNX model directory
+pub fn qwen_onnx_model_dir(use_int8: bool) -> PathBuf {
+    let subdir = if use_int8 { "qwen-onnx-int8" } else { "qwen-onnx" };
+    get_models_dir()
+        .expect("models dir")
+        .join("qwen")
+        .join(subdir)
+}
+
+/// Check if Qwen ONNX model is ready
+pub fn qwen_onnx_model_ready(use_int8: bool) -> bool {
+    let model_dir = qwen_onnx_model_dir(use_int8);
+    // Check for essential ONNX files
+    let suffix = if use_int8 { "_q" } else { "" };
+    model_dir.join(format!("talker_prefill{}.onnx", suffix)).exists()
+        && model_dir.join(format!("talker_decode{}.onnx", suffix)).exists()
+        && model_dir.join("vocoder.onnx").exists()
+}
+
+/// Ensure Qwen ONNX model is downloaded
+pub async fn ensure_qwen_onnx_model(
+    use_int8: bool,
+    progress: &dyn ModelProgressCallback,
+) -> Result<(), ModelError> {
+    if qwen_onnx_model_ready(use_int8) {
+        log::info!("[MODELS] Qwen ONNX {} model already ready", if use_int8 { "INT8" } else { "FP16" });
+        return Ok(());
+    }
+
+    let (model_id, size_mb, model_name) = if use_int8 {
+        (QWEN_ONNX_INT8_MODEL_ID, QWEN_ONNX_INT8_SIZE_MB, "Qwen ONNX INT8 (0.6B)")
+    } else {
+        (QWEN_ONNX_FP16_MODEL_ID, QWEN_ONNX_FP16_SIZE_MB, "Qwen ONNX FP16 (0.6B)")
+    };
+
+    progress.on_download_start(model_name, size_mb);
+
+    let model_id_owned = model_id.to_string();
+    let target_dir = qwen_onnx_model_dir(use_int8);
+
+    // Download from HuggingFace
+    tokio::task::spawn_blocking(move || -> Result<(), ModelError> {
+        log::info!("[MODELS] Downloading Qwen ONNX model from HuggingFace: {}", model_id_owned);
+        
+        fs::create_dir_all(&target_dir)
+            .map_err(|e| ModelError::IoError(e.to_string()))?;
+
+        // Use huggingface_hub to download model files
+        // For now, we'll use a simple HTTP download approach
+        let files_to_download = if use_int8 {
+            vec![
+                "talker_prefill_q.onnx",
+                "talker_prefill_q.onnx.data",
+                "talker_decode_q.onnx",
+                "talker_decode_q.onnx.data",
+                "code_predictor_q.onnx",
+                "vocoder.onnx",
+                "vocoder.onnx.data",
+            ]
+        } else {
+            vec![
+                "talker_prefill.onnx",
+                "talker_prefill.onnx.data",
+                "talker_decode.onnx",
+                "talker_decode.onnx.data",
+                "code_predictor.onnx",
+                "vocoder.onnx",
+                "vocoder.onnx.data",
+            ]
+        };
+
+        let base_url = format!("https://huggingface.co/{}/resolve/main", model_id_owned);
+        
+        for file in files_to_download {
+            let url = format!("{}/{}", base_url, file);
+            let target_path = target_dir.join(file);
+            
+            if target_path.exists() {
+                log::debug!("[MODELS] File already exists: {}", file);
+                continue;
+            }
+
+            log::info!("[MODELS] Downloading: {}", file);
+            
+            let response = reqwest::blocking::get(&url)
+                .map_err(|e| ModelError::DownloadError(format!("Failed to download {}: {}", file, e)))?;
+            
+            if !response.status().is_success() {
+                // Some files may not exist (e.g., .data files)
+                log::warn!("[MODELS] Could not download {} (status: {})", file, response.status());
+                continue;
+            }
+            
+            let bytes = response.bytes()
+                .map_err(|e| ModelError::DownloadError(format!("Failed to read {}: {}", file, e)))?;
+            
+            fs::write(&target_path, &bytes)
+                .map_err(|e| ModelError::IoError(format!("Failed to write {}: {}", file, e)))?;
+        }
+
+        log::info!("[MODELS] Qwen ONNX model downloaded to {:?}", target_dir);
+        Ok(())
+    })
+    .await
+    .map_err(|e| ModelError::DownloadError(format!("Download task failed: {}", e)))??;
+
+    progress.on_download_complete(model_name);
+    Ok(())
+}
+
+// ============================================
 // Voice Library - Save/Load/Delete voice embeddings
 // ============================================
 
