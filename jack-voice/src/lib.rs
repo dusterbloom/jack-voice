@@ -13,6 +13,7 @@ pub mod kokoro_tts;
 pub mod models;
 pub mod parakeet_stt;
 pub mod pipeline;
+pub mod qwen_onnx;
 pub mod qwen_onnx_tts;
 pub mod qwen_tts;
 pub mod speaker;
