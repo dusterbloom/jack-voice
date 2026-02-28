@@ -11,25 +11,23 @@
 //! - https://huggingface.co/sivasub987/Qwen3-TTS-0.6B-ONNX-INT8
 //! - https://huggingface.co/elbruno/Qwen3-TTS-12Hz-0.6B-CustomVoice-ONNX
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use ort::session::{builder::GraphOptimizationLevel, Session};
 
+use crate::qwen_onnx::{
+    BpeTokenizer, CodePredictor, EmbeddingManager, Language, OnnxTtsConfig, SamplingConfig,
+    Speaker, TalkerKVCache, TalkerLM, TextTokenizer, Vocoder,
+};
+
 const SAMPLE_RATE: u32 = 24000;
 
-/// Qwen ONNX model components
-struct OnnxModelComponents {
-    /// Talker LM prefill (initial token generation)
-    talker_prefill: Session,
-    /// Talker LM decode (autoregressive generation)
-    talker_decode: Session,
-    /// Code predictor (generates codebook indices)
-    code_predictor: Session,
-    /// Vocoder (converts codes to audio)
-    vocoder: Session,
-    /// Speaker encoder for voice cloning (optional)
-    speaker_encoder: Option<Session>,
+struct OnnxComponents {
+    talker: TalkerLM,
+    code_predictor: CodePredictor,
+    vocoder: Vocoder,
+    tokenizer: BpeTokenizer,
+    embeddings: Arc<EmbeddingManager>,
 }
 
 /// ONNX model variant
@@ -78,20 +76,20 @@ impl ExecutionProvider {
 
 /// Qwen3 TTS using ONNX Runtime
 pub struct QwenOnnxTts {
-    models: Arc<OnnxModelComponents>,
+    components: Option<OnnxComponents>,
     variant: OnnxModelVariant,
     provider: ExecutionProvider,
-    current_speaker: String,
+    current_speaker: Speaker,
+    current_language: Language,
+    config: OnnxTtsConfig,
     sample_rate: u32,
 }
 
 impl QwenOnnxTts {
-    /// Create a new Qwen ONNX TTS instance with the specified variant
     pub fn new(model_dir: &std::path::Path, variant: OnnxModelVariant) -> Result<Self, TtsError> {
         Self::with_provider(model_dir, variant, ExecutionProvider::default())
     }
 
-    /// Create a new Qwen ONNX TTS instance with specific execution provider
     pub fn with_provider(
         model_dir: &std::path::Path,
         variant: OnnxModelVariant,
@@ -104,55 +102,73 @@ impl QwenOnnxTts {
             model_dir.display()
         );
 
-        let models = Self::load_models(model_dir, variant, provider)?;
-
-        log::info!("[QwenOnnx] Models loaded successfully");
-
-        Ok(Self {
-            models: Arc::new(models),
-            variant,
-            provider,
-            current_speaker: "ryan".to_string(),
-            sample_rate: SAMPLE_RATE,
-        })
-    }
-
-    /// Load all ONNX model components
-    fn load_models(
-        model_dir: &std::path::Path,
-        variant: OnnxModelVariant,
-        _provider: ExecutionProvider,
-    ) -> Result<OnnxModelComponents, TtsError> {
         let suffix = match variant {
             OnnxModelVariant::Fp16 => "",
             OnnxModelVariant::Int8 => "_q",
         };
 
+        let tokenizer_dir = model_dir.join("tokenizer");
+        let embeddings_dir = model_dir.join("embeddings");
+
+        if !tokenizer_dir.exists() {
+            return Err(TtsError::InitError(format!(
+                "Tokenizer directory not found: {}",
+                tokenizer_dir.display()
+            )));
+        }
+        if !embeddings_dir.exists() {
+            return Err(TtsError::InitError(format!(
+                "Embeddings directory not found: {}",
+                embeddings_dir.display()
+            )));
+        }
+
+        let tokenizer = BpeTokenizer::from_files(&tokenizer_dir)
+            .map_err(|e| TtsError::InitError(format!("Failed to load tokenizer: {}", e)))?;
+
+        let embeddings = EmbeddingManager::load(&embeddings_dir)
+            .map_err(|e| TtsError::InitError(format!("Failed to load embeddings: {}", e)))?;
+        let embeddings = Arc::new(embeddings);
+
         let talker_prefill =
             Self::load_session(&model_dir.join(&format!("talker_prefill{}.onnx", suffix)))?;
         let talker_decode =
             Self::load_session(&model_dir.join(&format!("talker_decode{}.onnx", suffix)))?;
-        let code_predictor =
+        let code_predictor_session =
             Self::load_session(&model_dir.join(&format!("code_predictor{}.onnx", suffix)))?;
-        let vocoder = Self::load_session(&model_dir.join("vocoder.onnx"))?;
+        let vocoder_session = Self::load_session(&model_dir.join("vocoder.onnx"))?;
 
-        let speaker_encoder_path = model_dir.join(&format!("speaker_encoder{}.onnx", suffix));
-        let speaker_encoder = if speaker_encoder_path.exists() {
-            Some(Self::load_session(&speaker_encoder_path)?)
-        } else {
-            None
-        };
-
-        Ok(OnnxModelComponents {
+        let talker = TalkerLM::new(
             talker_prefill,
             talker_decode,
+            Arc::clone(&embeddings),
+            SamplingConfig::default(),
+        );
+
+        let code_predictor = CodePredictor::new(code_predictor_session, SamplingConfig::default());
+        let vocoder = Vocoder::new(vocoder_session);
+
+        let components = OnnxComponents {
+            talker,
             code_predictor,
             vocoder,
-            speaker_encoder,
+            tokenizer,
+            embeddings,
+        };
+
+        log::info!("[QwenOnnx] All components loaded successfully");
+
+        Ok(Self {
+            components: Some(components),
+            variant,
+            provider,
+            current_speaker: Speaker::Ryan,
+            current_language: Language::English,
+            config: OnnxTtsConfig::default(),
+            sample_rate: SAMPLE_RATE,
         })
     }
 
-    /// Load a single ONNX session
     fn load_session(model_path: &std::path::Path) -> Result<Session, TtsError> {
         if !model_path.exists() {
             return Err(TtsError::ModelNotFound(format!(
@@ -175,58 +191,42 @@ impl QwenOnnxTts {
             })
     }
 
-    /// Set the speaker voice
     pub fn set_speaker(&mut self, speaker_id: &str) -> Result<(), TtsError> {
-        // Validate speaker is in available list
-        let valid_speakers = Self::available_speakers();
-        if !valid_speakers.iter().any(|(id, _)| id == &speaker_id) {
-            return Err(TtsError::ModelNotFound(format!(
+        let speaker = Speaker::from_name(speaker_id).ok_or_else(|| {
+            TtsError::ModelNotFound(format!(
                 "Unknown speaker '{}'. Available: {:?}",
                 speaker_id,
-                valid_speakers.iter().map(|(id, _)| id).collect::<Vec<_>>()
-            )));
-        }
-        self.current_speaker = speaker_id.to_string();
+                Speaker::all()
+                    .iter()
+                    .map(|s| format!("{:?}", s))
+                    .collect::<Vec<_>>()
+            ))
+        })?;
+        self.current_speaker = speaker;
         Ok(())
     }
 
-    /// Get the current speaker
-    pub fn speaker(&self) -> &str {
-        &self.current_speaker
+    pub fn set_language(&mut self, lang_code: &str) -> Result<(), TtsError> {
+        let language = Language::from_iso(lang_code).ok_or_else(|| {
+            TtsError::ModelNotFound(format!("Unknown language code: {}", lang_code))
+        })?;
+        self.current_language = language;
+        Ok(())
     }
 
-    /// Get available speakers
+    pub fn speaker(&self) -> Speaker {
+        self.current_speaker
+    }
+
+    pub fn language(&self) -> Language {
+        self.current_language
+    }
+
     pub fn available_speakers() -> Vec<(&'static str, &'static str)> {
         crate::qwen_tts::QWEN_LITE_VOICES.to_vec()
     }
 
-    /// Check if voice cloning is supported
-    pub fn supports_voice_cloning(&self) -> bool {
-        self.models.speaker_encoder.is_some()
-    }
-
-    /// Synthesize text to audio
-    ///
-    /// # Implementation Status
-    ///
-    /// This is a placeholder implementation. Full synthesis requires:
-    ///
-    /// 1. **Text Tokenization**: BPE tokenizer (vocab.json + merges.txt)
-    /// 2. **Talker Prefill**: Run `talker_prefill.onnx` with text embeddings
-    /// 3. **Talker Decode Loop**: Run `talker_decode.onnx` autoregressively
-    /// 4. **Code Predictor**: For each talker step, run `code_predictor.onnx` to generate
-    ///    31 additional codebook tokens
-    /// 5. **Vocoder**: Run `vocoder.onnx` to convert codes to audio
-    ///
-    /// See: https://huggingface.co/elbruno/Qwen3-TTS-12Hz-0.6B-CustomVoice-ONNX
-    ///
-    /// # TODO
-    ///
-    /// - Implement BPE tokenizer (or use tokenizers crate)
-    /// - Implement embedding lookups (text + codec)
-    /// - Implement KV cache management for decode loop
-    /// - Implement vocoder decode
-    pub fn synthesize(&self, text: &str) -> Result<AudioOutput, TtsError> {
+    pub fn synthesize(&mut self, text: &str) -> Result<AudioOutput, TtsError> {
         if text.trim().is_empty() {
             return Ok(AudioOutput {
                 samples: vec![],
@@ -234,30 +234,119 @@ impl QwenOnnxTts {
             });
         }
 
+        let components = self
+            .components
+            .as_mut()
+            .ok_or_else(|| TtsError::InitError("Components not initialized".to_string()))?;
+
         log::info!(
-            "[QwenOnnx] Synthesis requested for: '{}' ({} chars)",
+            "[QwenOnnx] Synthesizing: '{}' ({} chars)",
             text.chars().take(50).collect::<String>(),
             text.len()
         );
-        log::warn!("[QwenOnnx] Synthesis not yet implemented");
-        log::info!(
-            "[QwenOnnx] Required models: talker_prefill.onnx, talker_decode.onnx, \
-             code_predictor.onnx, vocoder.onnx, embeddings/, tokenizer/"
+
+        let input_ids = components
+            .tokenizer
+            .encode(text)
+            .map_err(|e| TtsError::SynthesisError(format!("Tokenization failed: {}", e)))?;
+
+        log::debug!("[QwenOnnx] Tokenized to {} tokens", input_ids.len());
+
+        let prefill_output = components
+            .talker
+            .prefill(&input_ids, self.current_speaker, self.current_language)
+            .map_err(|e| TtsError::SynthesisError(format!("Talker prefill failed: {}", e)))?;
+
+        log::debug!(
+            "[QwenOnnx] Prefill complete, seq_len={}",
+            prefill_output.seq_len
         );
 
-        // Return empty audio for now
+        let mut all_codes: Vec<[i64; 16]> = Vec::new();
+        let mut kv_cache = prefill_output.kv_cache;
+        let mut current_logits = prefill_output.logits;
+        let mut current_hidden = prefill_output.hidden;
+        let mut position = prefill_output.seq_len;
+
+        let eos_token = components.tokenizer.eos_token_id();
+        let codec_eos = crate::qwen_onnx::special_tokens::CODEC_EOS as i64;
+
+        let mut rng = crate::qwen_onnx::create_rng(self.config.sampling.seed);
+
+        for frame_idx in 0..self.config.max_frames {
+            let semantic_token = crate::qwen_onnx::sample_token(
+                &current_logits,
+                &self.config.sampling,
+                codec_eos,
+                &mut rng,
+            )
+            .map_err(|e| TtsError::SynthesisError(format!("Sampling failed: {}", e)))?;
+
+            if semantic_token == eos_token || semantic_token == codec_eos {
+                log::info!("[QwenOnnx] Reached EOS at frame {}", frame_idx);
+                break;
+            }
+
+            let acoustic_codes = components
+                .code_predictor
+                .generate_acoustic_codes(&current_hidden, semantic_token, &components.embeddings)
+                .map_err(|e| TtsError::SynthesisError(format!("Code predictor failed: {}", e)))?;
+
+            let mut frame_codes = [0i64; 16];
+            frame_codes[0] = semantic_token;
+            frame_codes[1..16].copy_from_slice(&acoustic_codes);
+            all_codes.push(frame_codes);
+
+            let step_embed = components
+                .talker
+                .build_step_embedding(semantic_token, &acoustic_codes, None)
+                .map_err(|e| TtsError::SynthesisError(format!("Step embedding failed: {}", e)))?;
+
+            let decode_output = components
+                .talker
+                .decode_step(&step_embed, position, &mut kv_cache)
+                .map_err(|e| TtsError::SynthesisError(format!("Decode step failed: {}", e)))?;
+
+            current_logits = decode_output.logits;
+            current_hidden = decode_output.hidden;
+            position += 1;
+        }
+
+        if all_codes.is_empty() {
+            return Ok(AudioOutput {
+                samples: vec![],
+                sample_rate: self.sample_rate,
+            });
+        }
+
+        let num_frames = all_codes.len();
+        let mut codes_array = ndarray::Array2::zeros((16, num_frames));
+        for (t, frame) in all_codes.iter().enumerate() {
+            for (c, &code) in frame.iter().enumerate() {
+                codes_array[[c, t]] = code;
+            }
+        }
+
+        log::debug!("[QwenOnnx] Vocoding {} frames", num_frames);
+
+        let audio = components
+            .vocoder
+            .decode(&codes_array)
+            .map_err(|e| TtsError::SynthesisError(format!("Vocoder failed: {}", e)))?;
+
+        log::info!(
+            "[QwenOnnx] Synthesis complete: {} samples ({:.2}s)",
+            audio.len(),
+            audio.len() as f32 / self.sample_rate as f32
+        );
+
         Ok(AudioOutput {
-            samples: vec![],
+            samples: audio,
             sample_rate: self.sample_rate,
         })
     }
 
-    /// Synthesize text with streaming callback
-    ///
-    /// # Implementation Status
-    ///
-    /// This is a placeholder implementation. See [`synthesize`](Self::synthesize) for details.
-    pub fn synthesize_streaming<F>(&self, text: &str, _on_chunk: F) -> Result<u32, TtsError>
+    pub fn synthesize_streaming<F>(&mut self, text: &str, mut on_chunk: F) -> Result<u32, TtsError>
     where
         F: FnMut(&[f32], u32) -> bool,
     {
@@ -265,22 +354,122 @@ impl QwenOnnxTts {
             return Ok(self.sample_rate);
         }
 
+        let components = self
+            .components
+            .as_mut()
+            .ok_or_else(|| TtsError::InitError("Components not initialized".to_string()))?;
+
         log::info!(
-            "[QwenOnnx] Streaming synthesis requested for: '{}' ({} chars)",
+            "[QwenOnnx] Streaming synthesis: '{}' ({} chars)",
             text.chars().take(50).collect::<String>(),
             text.len()
         );
-        log::warn!("[QwenOnnx] Streaming synthesis not yet implemented");
 
+        let input_ids = components
+            .tokenizer
+            .encode(text)
+            .map_err(|e| TtsError::SynthesisError(format!("Tokenization failed: {}", e)))?;
+
+        let prefill_output = components
+            .talker
+            .prefill(&input_ids, self.current_speaker, self.current_language)
+            .map_err(|e| TtsError::SynthesisError(format!("Talker prefill failed: {}", e)))?;
+
+        let mut chunk_codes: Vec<[i64; 16]> = Vec::with_capacity(self.config.frames_per_chunk);
+        let mut kv_cache = prefill_output.kv_cache;
+        let mut current_logits = prefill_output.logits;
+        let mut current_hidden = prefill_output.hidden;
+        let mut position = prefill_output.seq_len;
+
+        let eos_token = components.tokenizer.eos_token_id();
+        let codec_eos = crate::qwen_onnx::special_tokens::CODEC_EOS as i64;
+
+        let mut rng = crate::qwen_onnx::create_rng(self.config.sampling.seed);
+
+        for frame_idx in 0..self.config.max_frames {
+            let semantic_token = crate::qwen_onnx::sample_token(
+                &current_logits,
+                &self.config.sampling,
+                codec_eos,
+                &mut rng,
+            )
+            .map_err(|e| TtsError::SynthesisError(format!("Sampling failed: {}", e)))?;
+
+            if semantic_token == eos_token || semantic_token == codec_eos {
+                log::info!("[QwenOnnx] Reached EOS at frame {}", frame_idx);
+                break;
+            }
+
+            let acoustic_codes = components
+                .code_predictor
+                .generate_acoustic_codes(&current_hidden, semantic_token, &components.embeddings)
+                .map_err(|e| TtsError::SynthesisError(format!("Code predictor failed: {}", e)))?;
+
+            let mut frame_codes = [0i64; 16];
+            frame_codes[0] = semantic_token;
+            frame_codes[1..16].copy_from_slice(&acoustic_codes);
+            chunk_codes.push(frame_codes);
+
+            if chunk_codes.len() >= self.config.frames_per_chunk {
+                let mut codes_array = ndarray::Array2::zeros((16, chunk_codes.len()));
+                for (t, frame) in chunk_codes.iter().enumerate() {
+                    for (c, &code) in frame.iter().enumerate() {
+                        codes_array[[c, t]] = code;
+                    }
+                }
+
+                let audio = components
+                    .vocoder
+                    .decode(&codes_array)
+                    .map_err(|e| TtsError::SynthesisError(format!("Vocoder failed: {}", e)))?;
+
+                if !on_chunk(&audio, self.sample_rate) {
+                    log::info!("[QwenOnnx] Streaming cancelled by callback");
+                    return Ok(self.sample_rate);
+                }
+
+                chunk_codes.clear();
+            }
+
+            let step_embed = components
+                .talker
+                .build_step_embedding(semantic_token, &acoustic_codes, None)
+                .map_err(|e| TtsError::SynthesisError(format!("Step embedding failed: {}", e)))?;
+
+            let decode_output = components
+                .talker
+                .decode_step(&step_embed, position, &mut kv_cache)
+                .map_err(|e| TtsError::SynthesisError(format!("Decode step failed: {}", e)))?;
+
+            current_logits = decode_output.logits;
+            current_hidden = decode_output.hidden;
+            position += 1;
+        }
+
+        if !chunk_codes.is_empty() {
+            let mut codes_array = ndarray::Array2::zeros((16, chunk_codes.len()));
+            for (t, frame) in chunk_codes.iter().enumerate() {
+                for (c, &code) in frame.iter().enumerate() {
+                    codes_array[[c, t]] = code;
+                }
+            }
+
+            let audio = components
+                .vocoder
+                .decode(&codes_array)
+                .map_err(|e| TtsError::SynthesisError(format!("Vocoder failed: {}", e)))?;
+
+            on_chunk(&audio, self.sample_rate);
+        }
+
+        log::info!("[QwenOnnx] Streaming synthesis complete");
         Ok(self.sample_rate)
     }
 
-    /// Get the sample rate
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
-    /// Get the engine type string
     pub fn engine_type(&self) -> &'static str {
         match self.variant {
             OnnxModelVariant::Fp16 => "qwen-onnx",
