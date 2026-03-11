@@ -1,11 +1,11 @@
-mod vad;
+mod llm;
 mod stt;
 mod tts;
-mod llm;
+mod vad;
 mod voice_pipeline;
 
-pub use vad::*;
+pub use llm::*;
 pub use stt::*;
 pub use tts::*;
-pub use llm::*;
+pub use vad::*;
 pub use voice_pipeline::*;

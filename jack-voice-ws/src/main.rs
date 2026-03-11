@@ -2,11 +2,11 @@
 //!
 //! Implements the OpenAI Realtime API protocol for full-duplex voice streaming
 
-mod protocol;
-mod session;
 mod audio;
 mod pipeline;
+mod protocol;
 mod server;
+mod session;
 
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

@@ -28,57 +28,54 @@ impl std::fmt::Display for HandlerError {
 impl std::error::Error for HandlerError {}
 
 /// Handle a client event and return optional server event
-pub async fn handle_event(
-    event: ClientEvent,
-    session_id: &str,
-) -> HandlerResult {
+pub async fn handle_event(event: ClientEvent, session_id: &str) -> HandlerResult {
     match event {
         ClientEvent::SessionUpdate(_) => {
             // Would update session config
             Ok(None)
         }
-        
+
         ClientEvent::InputAudioBufferAppend(append) => {
             // Would add to input buffer
             let _ = append.audio_data;
             Ok(None)
         }
-        
+
         ClientEvent::InputAudioBufferCommit => {
             // Would trigger transcription
             Ok(None)
         }
-        
+
         ClientEvent::InputAudioBufferClear => {
             // Would clear buffer
             Ok(None)
         }
-        
+
         ClientEvent::ResponseCreate(_) => {
             // Would generate response
             Ok(None)
         }
-        
+
         ClientEvent::ResponseCancel => {
             // Would cancel response
             Ok(None)
         }
-        
+
         ClientEvent::ConversationItemCreate(_) => {
             // Would add item
             Ok(None)
         }
-        
+
         ClientEvent::ConversationItemDelete(_) => {
             // Would delete item
             Ok(None)
         }
-        
+
         ClientEvent::ConversationItemTruncate(_) => {
             // Would truncate item
             Ok(None)
         }
-        
+
         ClientEvent::SessionCommit => {
             // Would commit session
             Ok(None)

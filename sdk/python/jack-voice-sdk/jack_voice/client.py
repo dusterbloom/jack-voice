@@ -181,6 +181,7 @@ class JackVoice:
         timeout: Optional[float] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """Synthesize text. Pass `language` for deterministic multilingual routing."""
         params: Dict[str, Any] = {"text": text}
         if voice is not None:
             params["voice"] = voice
@@ -202,7 +203,7 @@ class JackVoice:
         timeout: Optional[float] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> Iterator[TtsChunkEvent]:
-        """Stream TTS synthesis. Yields TtsChunkEvent for tts.start/tts.chunk/tts.end events."""
+        """Stream TTS synthesis. Pass `language` for deterministic multilingual routing."""
         if self._closed.is_set():
             raise BridgeClosedError("Bridge connection is closed.", code="PROCESS_EXITED")
 
@@ -581,6 +582,8 @@ def _build_process_env(
 
     runtime_dirs = _discover_runtime_dirs(command, cwd=cwd, env=proc_env)
     _prepend_env_path(proc_env, _loader_search_var(), runtime_dirs)
+    proc_env.setdefault("LIBTORCH_USE_PYTORCH", "1")
+    proc_env.setdefault("LIBTORCH_BYPASS_VERSION_CHECK", "1")
 
     if _is_wsl() and not proc_env.get("PULSE_SERVER"):
         wslg_pulse = pathlib.Path("/mnt/wslg/PulseServer")
@@ -618,6 +621,9 @@ def _discover_runtime_dirs(
         dirs.append(str(executable_path.parent))
 
     for runtime_dir in _candidate_runtime_dirs(cwd=cwd):
+        dirs.append(str(runtime_dir))
+
+    for runtime_dir in _candidate_torch_runtime_dirs(cwd=cwd, env=env):
         dirs.append(str(runtime_dir))
 
     return _dedupe_preserve_order(dirs)
@@ -672,6 +678,37 @@ def _candidate_runtime_dirs(*, cwd: Optional[str]) -> Sequence[pathlib.Path]:
             ("target", "release"),
             ("jack-voice-bridge", "target", "debug"),
             ("jack-voice-bridge", "target", "release"),
+        ):
+            candidate = root.joinpath(*rel)
+            if candidate.is_dir():
+                dirs.append(candidate.resolve())
+
+    return _dedupe_paths(dirs)
+
+
+def _candidate_torch_runtime_dirs(
+    *,
+    cwd: Optional[str],
+    env: Mapping[str, str],
+) -> Sequence[pathlib.Path]:
+    dirs: list[pathlib.Path] = []
+
+    explicit = str(env.get("JACK_VOICE_TORCH_LIB_DIR", "")).strip()
+    if explicit:
+        candidate = pathlib.Path(explicit)
+        if candidate.is_dir():
+            dirs.append(candidate.resolve())
+
+    for root in _candidate_roots(cwd=cwd):
+        for rel in (
+            (
+                ".venv312",
+                "lib",
+                "python3.12",
+                "site-packages",
+                "torch",
+                "lib",
+            ),
         ):
             candidate = root.joinpath(*rel)
             if candidate.is_dir():

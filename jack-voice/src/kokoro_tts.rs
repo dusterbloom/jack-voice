@@ -8,8 +8,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use kokoro_tiny::TtsEngine;
 use ndarray::{ArrayBase, IxDyn, OwnedRepr};
@@ -193,161 +192,6 @@ fn split_into_sentences(text: &str) -> Vec<String> {
     }
 
     final_chunks
-}
-
-/// Rule-based Italian G2P (grapheme-to-phoneme) conversion
-/// Matches the JS prototype's `italianG2P()` function exactly.
-/// Italian has very regular spelling-to-sound rules, making rule-based G2P reliable.
-/// This produces phonemes compatible with Kokoro's tokenizer vocabulary.
-fn italian_g2p(text: &str) -> String {
-    let mut s = text.to_lowercase();
-
-    // Replace digits with Italian words
-    let digit_words = [
-        "zero", "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove",
-    ];
-    for (digit, word) in digit_words.iter().enumerate() {
-        s = s.replace(&digit.to_string(), &format!(" {} ", word));
-    }
-
-    // Multi-char replacements (order matters - longest first)
-    // Trigraphs
-    // gli + vowel → ʎ (the vowel stays)
-    for v in ["a", "e", "o", "u", "à", "è", "é", "ì", "ò", "ó", "ù"] {
-        let from = format!("gli{}", v);
-        let to = format!("ʎ{}", v);
-        s = s.replace(&from, &to);
-    }
-    s = s.replace("gli", "ʎi"); // gli standalone
-
-    s = s.replace("sch", "sk");
-
-    // sci + vowel → ʃ (vowel stays)
-    // NOTE: include plain "e" so "scie" → "ʃe" (e.g. "scienza").
-    for v in ["a", "e", "o", "u", "à", "è", "é", "ì", "ò", "ó", "ù"] {
-        let from = format!("sci{}", v);
-        let to = format!("ʃ{}", v);
-        s = s.replace(&from, &to);
-    }
-    s = s.replace("sce", "ʃe");
-    s = s.replace("sci", "ʃi");
-
-    s = s.replace("ghi", "ɡi");
-    s = s.replace("ghe", "ɡe");
-    s = s.replace("chi", "ki");
-    s = s.replace("che", "ke");
-
-    // Digraphs
-    s = s.replace("gh", "ɡ");
-    s = s.replace("ch", "k");
-    s = s.replace("gn", "ɲ");
-
-    // sc before i/e (safety - most caught above)
-    s = s.replace("sce", "ʃe");
-    s = s.replace("sci", "ʃi");
-
-    // ci + vowel → tʃ (vowel stays)
-    for v in ["a", "e", "o", "u", "à", "è", "é", "ì", "ò", "ó", "ù"] {
-        let from = format!("ci{}", v);
-        let to = format!("tʃ{}", v);
-        s = s.replace(&from, &to);
-    }
-    s = s.replace("ce", "tʃe");
-    s = s.replace("ci", "tʃi");
-
-    // gi + vowel → dʒ (vowel stays)
-    for v in ["a", "e", "o", "u", "à", "è", "é", "ì", "ò", "ó", "ù"] {
-        let from = format!("gi{}", v);
-        let to = format!("dʒ{}", v);
-        s = s.replace(&from, &to);
-    }
-    s = s.replace("ge", "dʒe");
-    s = s.replace("gi", "dʒi");
-
-    s = s.replace("qu", "kw");
-    s = s.replace("cq", "kːw");
-
-    // Geminate consonants
-    s = s.replace("zz", "tːs");
-    s = s.replace("ss", "sː");
-    s = s.replace("ll", "lː");
-    s = s.replace("mm", "mː");
-    s = s.replace("nn", "nː");
-    s = s.replace("pp", "pː");
-    s = s.replace("tt", "tː");
-    s = s.replace("rr", "rː");
-    s = s.replace("ff", "fː");
-    s = s.replace("bb", "bː");
-    s = s.replace("dd", "dː");
-
-    // cc/gg before i/e
-    for v in ["i", "e", "è", "é"] {
-        let from = format!("cc{}", v);
-        let to = format!("tːʃ{}", v);
-        s = s.replace(&from, &to);
-    }
-    s = s.replace("cc", "kː");
-
-    for v in ["i", "e", "è", "é"] {
-        let from = format!("gg{}", v);
-        let to = format!("dːʒ{}", v);
-        s = s.replace(&from, &to);
-    }
-    s = s.replace("gg", "ɡː");
-
-    // Single consonants
-    for v in ["i", "e", "è", "é"] {
-        let from = format!("c{}", v);
-        let to = format!("tʃ{}", v);
-        s = s.replace(&from, &to);
-    }
-    s = s.replace("c", "k");
-
-    for v in ["i", "e", "è", "é"] {
-        let from = format!("g{}", v);
-        let to = format!("dʒ{}", v);
-        s = s.replace(&from, &to);
-    }
-    s = s.replace("g", "ɡ");
-
-    s = s.replace("z", "ts");
-    s = s.replace("h", ""); // silent
-    s = s.replace("j", "j");
-    s = s.replace("x", "ks");
-    s = s.replace("w", "w");
-    s = s.replace("y", "i");
-    s = s.replace("k", "k");
-
-    // Vowels with accents → stressed
-    s = s.replace("à", "ˈa");
-    s = s.replace("è", "ˈɛ");
-    s = s.replace("é", "ˈe");
-    s = s.replace("ì", "ˈi");
-    s = s.replace("ò", "ˈɔ");
-    s = s.replace("ó", "ˈo");
-    s = s.replace("ù", "ˈu");
-
-    // Plain vowels stay as-is (a, e, i, o, u are valid IPA)
-
-    // Strip non-speech characters
-    s = s.chars()
-        .filter(|c| {
-            c.is_whitespace()
-            || matches!(*c, 'a'..='z' | 'A'..='Z')
-            || ";:,.!?¡¿—…\"«»\u{201c}\u{201d} ".contains(*c)
-            || "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞".contains(*c)
-        })
-        .collect();
-
-    // Clean up whitespace
-    s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    // Safe truncation for logging (avoid panicking on multi-byte char boundaries)
-    let text_preview: String = text.chars().take(40).collect();
-    let s_preview: String = s.chars().take(80).collect();
-    log::debug!("[Italian G2P] '{}' → '{}'", text_preview, s_preview);
-
-    s
 }
 
 /// Check if a voice ID requires the direct pipeline
@@ -658,12 +502,8 @@ impl DirectPipeline {
                 continue;
             }
 
-            // Use Italian rule-based G2P for Italian, espeak-ng for all other languages
-            let phonemes_str = if language == "it" {
-                italian_g2p(chunk)
-            } else {
-                espeak_g2p(chunk, language, &self.vocab)?
-            };
+            // Use espeak-ng G2P for all non-English languages (including Italian)
+            let phonemes_str = espeak_g2p(chunk, language, &self.vocab)?;
             if phonemes_str.trim().is_empty() {
                 continue;
             }
@@ -712,6 +552,7 @@ impl DirectPipeline {
 /// Kokoro TTS wrapper using kokoro-tiny (English) + direct pipeline (other languages)
 pub struct KokoroTts {
     engine: Arc<Mutex<TtsEngine>>,
+    runtime: tokio::runtime::Runtime,
     direct_pipeline: Option<DirectPipeline>,
     sample_rate: u32,
     current_language: String,
@@ -758,6 +599,7 @@ impl KokoroTts {
 
         Ok(Self {
             engine: Arc::new(Mutex::new(engine)),
+            runtime,
             direct_pipeline,
             sample_rate: 24000,
             current_language: language.to_string(),
@@ -822,17 +664,13 @@ impl KokoroTts {
                 .synthesize(text, voice_name, language, speed)
                 .map_err(|e| TtsError::SynthesisError(e))?
         } else {
-            // English: use kokoro-tiny's built-in pipeline
+            // English: use kokoro-tiny's built-in pipeline (reuse stored runtime)
             let engine = self.engine.clone();
             let voice = voice_name.to_string();
             let text_owned = text.to_string();
 
-            let runtime = tokio::runtime::Runtime::new().map_err(|e| {
-                TtsError::SynthesisError(format!("Failed to create runtime: {}", e))
-            })?;
-
-            runtime.block_on(async move {
-                let mut engine = engine.lock().await;
+            self.runtime.block_on(async move {
+                let mut engine = engine.lock().expect("kokoro engine lock poisoned");
                 let primary = engine.synthesize(&text_owned, Some(&voice));
                 match primary {
                     Ok(samples) => Ok(samples),
@@ -869,6 +707,96 @@ impl KokoroTts {
             samples,
             sample_rate: self.sample_rate,
         })
+    }
+
+    /// Synthesize speech with per-chunk streaming callback.
+    ///
+    /// Each sentence/clause is synthesized independently and yielded to `on_chunk`
+    /// as soon as it's ready, dramatically reducing time-to-first-audio for
+    /// multi-sentence text.
+    pub fn synthesize_streaming<F>(
+        &mut self,
+        text: &str,
+        speaker_id: i32,
+        speed: f32,
+        on_chunk: &mut F,
+    ) -> Result<u32, TtsError>
+    where
+        F: FnMut(&[f32], u32) -> bool,
+    {
+        let voice_name = voice_id_to_name(speaker_id);
+
+        if needs_direct_pipeline(speaker_id) {
+            let pipeline = self.direct_pipeline.as_mut().ok_or_else(|| {
+                TtsError::SynthesisError(
+                    "Direct pipeline not available for non-English voice".to_string(),
+                )
+            })?;
+
+            let language = voice_id_to_language(speaker_id);
+            let chunks = split_into_sentences(text);
+
+            let style = pipeline
+                .voices
+                .get(voice_name)
+                .ok_or_else(|| {
+                    TtsError::SynthesisError(format!(
+                        "Voice '{}' not found in voices data",
+                        voice_name
+                    ))
+                })?
+                .clone();
+
+            for (i, chunk) in chunks.iter().enumerate() {
+                let chunk = chunk.trim();
+                if chunk.is_empty() {
+                    continue;
+                }
+
+                let phonemes_str = espeak_g2p(chunk, language, &pipeline.vocab)
+                    .map_err(|e| TtsError::SynthesisError(e))?;
+                if phonemes_str.trim().is_empty() {
+                    continue;
+                }
+
+                let mut tokens = pipeline.tokenize(&phonemes_str);
+                if tokens.is_empty() {
+                    continue;
+                }
+
+                tokens.insert(0, 0);
+                tokens.push(0);
+
+                log::debug!(
+                    "[DirectPipeline] Streaming chunk {}/{}: {} tokens",
+                    i + 1,
+                    chunks.len(),
+                    tokens.len(),
+                );
+
+                match pipeline.infer_chunk(tokens, &style, speed) {
+                    Ok(chunk_audio) => {
+                        if !on_chunk(&chunk_audio, self.sample_rate) {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[DirectPipeline] Streaming chunk {}/{} failed, skipping: {}",
+                            i + 1,
+                            chunks.len(),
+                            e
+                        );
+                    }
+                }
+            }
+        } else {
+            // English: kokoro-tiny doesn't support streaming, synthesize as one block
+            let result = self.synthesize(text, speaker_id, speed)?;
+            on_chunk(&result.samples, result.sample_rate);
+        }
+
+        Ok(self.sample_rate)
     }
 
     /// Get sample rate (always 24kHz for Kokoro)
@@ -918,25 +846,6 @@ mod tests {
     }
 
     #[test]
-    fn test_italian_g2p_basic() {
-        let result = italian_g2p("ciao");
-        assert!(result.contains("tʃ"), "ciao should contain tʃ: {}", result);
-
-        let result = italian_g2p("gli");
-        assert!(result.contains("ʎ"), "gli should contain ʎ: {}", result);
-
-        let result = italian_g2p("gnocchi");
-        assert!(result.contains("ɲ"), "gnocchi should contain ɲ: {}", result);
-
-        let result = italian_g2p("scienza");
-        assert!(
-            result.starts_with("ʃe"),
-            "scienza should start with ʃe (not ʃie): {}",
-            result
-        );
-    }
-
-    #[test]
     fn test_direct_pipeline_needed() {
         assert!(!needs_direct_pipeline(0)); // English
         assert!(!needs_direct_pipeline(10)); // English
@@ -974,5 +883,29 @@ mod tests {
             assert!(!audio.samples.is_empty());
             assert_eq!(audio.sample_rate, 24000);
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_kokoro_streaming_yields_per_chunk() {
+        let mut tts =
+            KokoroTts::new_with_language("it").expect("Failed to init Kokoro TTS for streaming");
+        let text = "Prima frase. Seconda frase. Terza frase.";
+        let mut chunk_count = 0usize;
+        let mut total_samples = 0usize;
+        let sr = tts
+            .synthesize_streaming(text, 35, 1.0, &mut |samples: &[f32], _sr: u32| {
+                chunk_count += 1;
+                total_samples += samples.len();
+                true
+            })
+            .expect("streaming synthesis");
+        assert_eq!(sr, 24000);
+        assert!(
+            chunk_count >= 2,
+            "Expected multiple streaming chunks for 3 sentences, got {}",
+            chunk_count
+        );
+        assert!(total_samples > 0);
     }
 }

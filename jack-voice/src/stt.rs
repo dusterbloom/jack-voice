@@ -132,27 +132,32 @@ fn create_whisper_turbo_with_language(
     create_whisper_with_language(paths, language)
 }
 
-/// Create Whisper recognizer with language hint and best available provider
+/// Create Whisper recognizer with language hint and best available provider.
+/// Priority: CoreML (macOS ANE) > DirectML (Windows) > CUDA > CPU.
 fn create_whisper_with_language(
     paths: &models::WhisperPaths,
     language: &str,
 ) -> Result<(WhisperRecognizer, &'static str), SttError> {
-    let gpu_provider = if cfg!(feature = "directml") {
-        Some(("DirectML", "directml"))
-    } else if cfg!(feature = "cuda") {
-        Some(("CUDA", "cuda"))
-    } else {
-        None
-    };
+    // Accelerated providers to try in order.
+    // NOTE: CoreML is NOT used — Whisper's autoregressive decoder doesn't map well
+    // to ANE and CoreML is actually slower than CPU for this model.
+    let mut providers: Vec<(&str, &str)> = Vec::new();
 
-    if let Some((provider_name, provider_string)) = gpu_provider {
+    if cfg!(feature = "directml") {
+        providers.push(("DirectML", "directml"));
+    }
+    if cfg!(feature = "cuda") {
+        providers.push(("CUDA", "cuda"));
+    }
+
+    for (provider_name, provider_string) in &providers {
         log::info!(
             "[STT] Attempting {} provider for Whisper (language: {})...",
             provider_name,
             language
         );
 
-        let gpu_config = WhisperConfig {
+        let config = WhisperConfig {
             encoder: paths.encoder.to_string_lossy().to_string(),
             decoder: paths.decoder.to_string_lossy().to_string(),
             tokens: paths.tokens.to_string_lossy().to_string(),
@@ -163,24 +168,29 @@ fn create_whisper_with_language(
             ..Default::default()
         };
 
-        match WhisperRecognizer::new(gpu_config) {
+        match WhisperRecognizer::new(config) {
             Ok(rec) => {
                 log::info!(
-                    "[STT] Whisper using {} (GPU accelerated, language: {})",
+                    "[STT] Whisper using {} (accelerated, language: {})",
                     provider_name,
                     language
                 );
                 return Ok((rec, provider_name));
             }
             Err(e) => {
-                log::warn!("[STT] {} unavailable ({}), using CPU", provider_name, e);
+                log::warn!("[STT] {} unavailable ({}), trying next", provider_name, e);
             }
         }
     }
 
+    // CPU fallback — use all performance cores
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4);
     log::info!(
-        "[STT] Using CPU provider for Whisper (language: {})",
-        language
+        "[STT] Using CPU provider for Whisper (language: {}, threads: {})",
+        language,
+        num_threads
     );
     let cpu_config = WhisperConfig {
         encoder: paths.encoder.to_string_lossy().to_string(),
@@ -188,7 +198,7 @@ fn create_whisper_with_language(
         tokens: paths.tokens.to_string_lossy().to_string(),
         language: language.to_string(),
         provider: Some("cpu".to_string()),
-        num_threads: Some(4),
+        num_threads: Some(num_threads),
         tail_paddings: Some(4800),
         ..Default::default()
     };
@@ -214,6 +224,9 @@ pub enum SttBackend {
     ParakeetEou(crate::parakeet_stt::ParakeetStreamingStt),
     /// Whisper Turbo (multilingual, fast, with language hints)
     WhisperTurbo(BatchTranscriber),
+    /// Voxtral Realtime 4B (13 languages, streaming, Metal GPU)
+    #[cfg(feature = "voxtral")]
+    Voxtral(crate::voxtral_stt::VoxtralStt),
 }
 
 pub struct SpeechToText {
@@ -237,22 +250,57 @@ impl SpeechToText {
         stt_language: Option<String>,
         tts_voice: Option<String>,
     ) -> Result<Self, SttError> {
-        // Determine language hint
+        // Determine language hint — empty string means auto-detect (multilingual)
         let language = match stt_language {
-            Some(lang) if !lang.is_empty() => lang,
-            _ => {
+            Some(lang) => lang, // empty string = auto-detect, explicit code = hint
+            None => {
                 // Auto-detect from TTS voice
                 if let Some(voice) = tts_voice {
                     detect_language_from_voice(&voice).to_string()
                 } else {
-                    "en".to_string()
+                    String::new() // auto-detect by default
                 }
             }
         };
 
         match mode {
             SttMode::Batch => {
-                // Try WhisperTurbo first if model exists (multilingual with language hints)
+                // Try Parakeet TDT first (multilingual 25 langs, ~10x faster than Whisper on CPU)
+                if let Ok(paths) = models::get_parakeet_tdt_paths() {
+                    match crate::parakeet_stt::ParakeetOfflineStt::new(
+                        paths.model_dir.to_str().unwrap_or("."),
+                    ) {
+                        Ok(tdt) => {
+                            log::info!("[STT] Using Parakeet TDT (multilingual, 25 langs)");
+                            return Ok(Self {
+                                backend: SttBackend::ParakeetTdt(tdt),
+                                mode,
+                            });
+                        }
+                        Err(e) => {
+                            log::warn!("[STT] Parakeet TDT failed, trying Whisper: {}", e)
+                        }
+                    }
+                }
+
+                // Fallback: Voxtral (13 langs, Metal GPU)
+                #[cfg(feature = "voxtral")]
+                if let Ok(paths) = models::get_voxtral_paths() {
+                    match crate::voxtral_stt::VoxtralStt::new(
+                        paths.model_dir.to_str().unwrap_or("."),
+                    ) {
+                        Ok(vox) => {
+                            log::info!("[STT] Using Voxtral Realtime 4B (13 langs, Metal GPU)");
+                            return Ok(Self {
+                                backend: SttBackend::Voxtral(vox),
+                                mode,
+                            });
+                        }
+                        Err(e) => log::warn!("[STT] Voxtral failed: {}", e),
+                    }
+                }
+
+                // Fallback: Whisper Turbo (multilingual with language hints)
                 if let Ok(paths) = models::get_whisper_turbo_paths() {
                     match BatchTranscriber::with_language(&paths, &language) {
                         Ok(transcriber) => {
@@ -266,23 +314,7 @@ impl SpeechToText {
                     }
                 }
 
-                // Try Parakeet TDT (multilingual), fall back to Whisper
-                if let Ok(paths) = models::get_parakeet_tdt_paths() {
-                    match crate::parakeet_stt::ParakeetOfflineStt::new(
-                        paths.model_dir.to_str().unwrap_or("."),
-                    ) {
-                        Ok(tdt) => {
-                            log::info!("[STT] Using Parakeet TDT (multilingual, 25 langs)");
-                            return Ok(Self {
-                                backend: SttBackend::ParakeetTdt(tdt),
-                                mode,
-                            });
-                        }
-                        Err(e) => {
-                            log::warn!("[STT] Parakeet TDT failed, falling back to Whisper: {}", e)
-                        }
-                    }
-                }
+                // Last resort: plain Whisper
                 let transcriber = BatchTranscriber::new()?;
                 Ok(Self {
                     backend: SttBackend::Batch(transcriber),
@@ -290,6 +322,23 @@ impl SpeechToText {
                 })
             }
             SttMode::Streaming => {
+                // Try Voxtral first (true streaming, 13 langs, Metal GPU)
+                #[cfg(feature = "voxtral")]
+                if let Ok(paths) = models::get_voxtral_paths() {
+                    match crate::voxtral_stt::VoxtralStt::new(
+                        paths.model_dir.to_str().unwrap_or("."),
+                    ) {
+                        Ok(vox) => {
+                            log::info!("[STT] Using Voxtral Realtime 4B for streaming (13 langs, Metal GPU)");
+                            return Ok(Self {
+                                backend: SttBackend::Voxtral(vox),
+                                mode,
+                            });
+                        }
+                        Err(e) => log::warn!("[STT] Voxtral failed, falling back: {}", e),
+                    }
+                }
+
                 // Use ParakeetTDT for streaming mode too
                 // WHY: ParakeetTDT handles batch transcription of complete audio buffers,
                 // which matches our architecture (accumulate audio → transcribe complete turn).
@@ -333,6 +382,8 @@ impl SpeechToText {
             SttBackend::ParakeetTdt(p) => p.is_ready(),
             SttBackend::ParakeetEou(p) => p.is_ready(),
             SttBackend::WhisperTurbo(w) => w.is_ready(),
+            #[cfg(feature = "voxtral")]
+            SttBackend::Voxtral(v) => v.is_ready(),
         }
     }
 
@@ -344,6 +395,8 @@ impl SpeechToText {
         match &mut self.backend {
             SttBackend::Batch(b) => b.transcribe(samples),
             SttBackend::WhisperTurbo(w) => w.transcribe(samples),
+            #[cfg(feature = "voxtral")]
+            SttBackend::Voxtral(v) => v.transcribe(samples, 16000),
             SttBackend::ParakeetTdt(p) => p.transcribe(samples, 16000),
             SttBackend::ParakeetEou(p) => match p.feed_chunk(samples, 16000)? {
                 Some(r) => Ok(r),
@@ -380,6 +433,10 @@ impl SpeechToText {
             SttBackend::Batch(_) | SttBackend::ParakeetTdt(_) | SttBackend::WhisperTurbo(_) => Err(
                 SttError::ProcessingError("Use transcribe() for batch backend".to_string()),
             ),
+            #[cfg(feature = "voxtral")]
+            SttBackend::Voxtral(_) => Err(SttError::ProcessingError(
+                "Use transcribe() for Voxtral backend".to_string(),
+            )),
             SttBackend::ParakeetEou(_) => Ok(None), // EOU uses feed_chunk via transcribe()
             SttBackend::Streaming(s) => {
                 let start = std::time::Instant::now();
@@ -405,6 +462,10 @@ impl SpeechToText {
             SttBackend::Batch(_) | SttBackend::ParakeetTdt(_) | SttBackend::WhisperTurbo(_) => Err(
                 SttError::ProcessingError("Use transcribe() for batch backend".to_string()),
             ),
+            #[cfg(feature = "voxtral")]
+            SttBackend::Voxtral(_) => Err(SttError::ProcessingError(
+                "Use transcribe() for Voxtral backend".to_string(),
+            )),
             SttBackend::ParakeetEou(_) => Ok(None),
             SttBackend::Streaming(s) => {
                 let start = std::time::Instant::now();
@@ -557,8 +618,8 @@ pub struct BatchTranscriber {
     sample_rate: u32,
 }
 
-const STT_MIN_RMS_THRESHOLD: f32 = 0.0005;
-const STT_MIN_AMPLITUDE_THRESHOLD: f32 = 0.002;
+// Energy gating removed — Silero VAD is the sole gate for speech detection.
+// Audio that passes VAD should always be transcribed without additional rejection.
 
 impl BatchTranscriber {
     pub fn new() -> Result<Self, SttError> {
@@ -609,23 +670,8 @@ impl BatchTranscriber {
             });
         }
 
-        let max_val = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
-
-        if rms < STT_MIN_RMS_THRESHOLD || max_val < STT_MIN_AMPLITUDE_THRESHOLD {
-            log::info!(
-                "STT: Rejecting low-energy audio (rms={:.4}, max={:.4})",
-                rms,
-                max_val
-            );
-            return Ok(TranscriptionResult {
-                text: String::new(),
-                is_final: true,
-                is_partial: false,
-                latency_ms: 0,
-            });
-        }
-
+        // Silero VAD already filters silence/noise — no energy gating here.
+        // Just normalize for Whisper.
         let normalized_samples = Self::normalize_audio(samples, 0.1);
 
         let start = std::time::Instant::now();

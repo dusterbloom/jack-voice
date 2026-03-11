@@ -34,6 +34,10 @@ impl BridgeHarness {
         writeln!(self.stdin, "{encoded}").expect("failed to write request");
         self.stdin.flush().expect("failed to flush request");
 
+        self.read_message()
+    }
+
+    fn read_message(&mut self) -> Value {
         let mut line = String::new();
         let bytes_read = self
             .stdout
@@ -42,6 +46,35 @@ impl BridgeHarness {
         assert!(bytes_read > 0, "bridge closed stdout unexpectedly");
 
         serde_json::from_str(line.trim()).expect("response should be valid json")
+    }
+
+    fn rpc_with_events(&mut self, id: &str, method: &str, params: Value) -> (Vec<Value>, Value) {
+        let encoded = serde_json::to_string(&json!({
+            "type": "request",
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .expect("request should serialize");
+        writeln!(self.stdin, "{encoded}").expect("failed to write request");
+        self.stdin.flush().expect("failed to flush request");
+
+        let mut events = Vec::new();
+        loop {
+            let message = self.read_message();
+            match message.get("type").and_then(Value::as_str) {
+                Some("event") => {
+                    if message.get("id").and_then(Value::as_str) == Some(id) {
+                        events.push(message);
+                    }
+                }
+                Some("response") => {
+                    assert_eq!(message.get("id").and_then(Value::as_str), Some(id));
+                    return (events, message);
+                }
+                other => panic!("unexpected bridge message type {other:?}: {message}"),
+            }
+        }
     }
 
     fn rpc_ok(&mut self, id: &str, method: &str, params: Value) -> Value {
@@ -221,3 +254,4 @@ fn tts_stream_rejects_unsupported_format() {
 
     bridge.shutdown();
 }
+

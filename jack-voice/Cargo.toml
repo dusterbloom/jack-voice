@@ -21,14 +21,11 @@ kokoro-tiny = { version = "0.1.0", default-features = false, features = ["playba
 # Pocket TTS (English, Candle-based)
 pocket-tts = "0.6.2"
 
-# Qwen3 TTS (multilingual with voice cloning)
-qwen3-tts = { path = "../../qwen3-tts-rs", default-features = false, features = ["hub"] }
-
-# Candle core for GPU detection and tensor operations
-candle-core = { version = "0.9" }
-
 # Parakeet STT (multilingual)
 parakeet-rs = { version = "0.3", default-features = false }
+
+# Voxtral Realtime 4B STT (13 languages, Metal GPU)
+voxtral-sys = { path = "../voxtral-sys", optional = true }
 
 # ONNX Runtime for Smart Turn v3 + Supertonic
 ort = { version = "2.0.0-rc.11", features = ["download-binaries", "cuda"] }
@@ -86,8 +83,9 @@ bytemuck = "1"
 [features]
 default = ["download-binaries"]
 download-binaries = ["sherpa-rs/download-binaries"]
-cuda = ["kokoro-tiny/cuda", "parakeet-rs/cuda", "qwen3-tts/cuda"]
-metal = ["candle-core/metal", "qwen3-tts/metal", "pocket-tts/metal"]
+cuda = ["kokoro-tiny/cuda", "parakeet-rs/cuda"]
+metal = ["pocket-tts/metal"]
+voxtral = ["dep:voxtral-sys"]
 directml = ["parakeet-rs/directml"]
 
 [dev-dependencies]

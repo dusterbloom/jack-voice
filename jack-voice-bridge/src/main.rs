@@ -34,7 +34,7 @@ struct BridgeState {
     stt: Option<SpeechToText>,
     stt_key: Option<SttCacheKey>,
     tts: Option<TextToSpeech>,
-    tts_engine: Option<CachedTtsEngine>,
+    tts_requested_engine: Option<TtsEngine>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,47 +42,6 @@ struct SttCacheKey {
     mode: SttMode,
     language: Option<String>,
     tts_voice: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CachedTtsEngine {
-    Pocket,
-    Supertonic,
-    Kokoro,
-    Qwen,
-    QwenLarge,
-}
-
-impl CachedTtsEngine {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Pocket => "pocket",
-            Self::Supertonic => "supertonic",
-            Self::Kokoro => "kokoro",
-            Self::Qwen => "qwen",
-            Self::QwenLarge => "qwen-large",
-        }
-    }
-
-    fn as_jack_voice_engine(self) -> TtsEngine {
-        match self {
-            Self::Pocket => TtsEngine::Pocket,
-            Self::Supertonic => TtsEngine::Supertonic,
-            Self::Kokoro => TtsEngine::Kokoro,
-            Self::Qwen => TtsEngine::Qwen,
-            Self::QwenLarge => TtsEngine::QwenLarge,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RequestedTtsEngine {
-    Auto,
-    Pocket,
-    Supertonic,
-    Kokoro,
-    Qwen,
-    QwenLarge,
 }
 
 struct MethodOutcome {
@@ -151,6 +110,8 @@ struct TtsSynthesizeParams {
     engine: Option<String>,
     #[serde(default)]
     voice: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
     #[serde(default)]
     speed: Option<f32>,
     #[serde(default)]
@@ -673,12 +634,16 @@ fn handle_tts_synthesize(
     validate_tts_output_format(params.format.as_deref())?;
 
     let requested_engine = parse_tts_engine(params.engine.as_deref())?;
-    let engine_used = ensure_tts_instance(state, requested_engine)?;
+    ensure_tts_instance(state, requested_engine)?;
 
     let tts = state
         .tts
         .as_mut()
         .ok_or_else(|| RpcError::new(ErrorCode::InternalError, "TTS state unavailable"))?;
+
+    if let Some(language) = normalize_optional_string(params.language) {
+        tts.set_language(&language).map_err(map_tts_error)?;
+    }
 
     if let Some(voice) = normalize_optional_string(params.voice) {
         tts.set_speaker(&voice).map_err(map_tts_error)?;
@@ -690,6 +655,8 @@ fn handle_tts_synthesize(
 
     let audio = tts.synthesize(params.text.trim()).map_err(map_tts_error)?;
     let duration_ms = duration_ms_for_samples(audio.samples.len(), audio.sample_rate);
+    let engine_used = tts.resolved_engine();
+    let language_used = tts.current_language().map(str::to_string);
 
     Ok(json!({
         "audio_b64": encode_f32le_to_base64(&audio.samples),
@@ -699,7 +666,8 @@ fn handle_tts_synthesize(
         "duration_ms": duration_ms,
         "sample_count": audio.samples.len(),
         "engine": engine_used.as_str(),
-        "voice": tts.current_speaker()
+        "voice": tts.current_speaker(),
+        "language": language_used
     }))
 }
 
@@ -712,12 +680,16 @@ fn handle_tts_stream(
     validate_tts_output_format(params.format.as_deref())?;
 
     let requested_engine = parse_tts_engine(params.engine.as_deref())?;
-    let engine_used = ensure_tts_instance(state, requested_engine)?;
+    ensure_tts_instance(state, requested_engine)?;
 
     let tts = state
         .tts
         .as_mut()
         .ok_or_else(|| RpcError::new(ErrorCode::InternalError, "TTS state unavailable"))?;
+
+    if let Some(language) = normalize_optional_string(params.language) {
+        tts.set_language(&language).map_err(map_tts_error)?;
+    }
 
     if let Some(voice) = normalize_optional_string(params.voice) {
         tts.set_speaker(&voice).map_err(map_tts_error)?;
@@ -728,6 +700,9 @@ fn handle_tts_stream(
     }
 
     let voice_used = tts.current_speaker().to_string();
+    let language_used = tts.current_language().map(str::to_string);
+    let resolved_engine = tts.resolved_engine();
+    let resolved_engine_name = resolved_engine.as_str();
 
     write_event(
         stdout,
@@ -735,8 +710,9 @@ fn handle_tts_stream(
             request_id,
             "tts.start",
             json!({
-                "engine": engine_used.as_str(),
+                "engine": resolved_engine_name,
                 "voice": voice_used.as_str(),
+                "language": language_used,
                 "format": "f32le",
                 "channels": DEFAULT_CHANNELS
             }),
@@ -772,8 +748,9 @@ fn handle_tts_stream(
                     "channels": DEFAULT_CHANNELS,
                     "sample_count": samples.len(),
                     "duration_ms": duration_ms_for_samples(samples.len(), sample_rate),
-                    "engine": engine_used.as_str(),
-                    "voice": voice_used.as_str()
+                    "engine": resolved_engine_name,
+                    "voice": voice_used.as_str(),
+                    "language": language_used
                 }),
             );
 
@@ -804,8 +781,9 @@ fn handle_tts_stream(
             request_id,
             "tts.end",
             json!({
-                "engine": engine_used.as_str(),
+                "engine": resolved_engine_name,
                 "voice": voice_used.as_str(),
+                "language": language_used,
                 "format": "f32le",
                 "sample_rate_hz": sample_rate,
                 "channels": DEFAULT_CHANNELS,
@@ -825,15 +803,16 @@ fn handle_tts_stream(
     Ok(json!({
         "streamed": true,
         "event": "tts.chunk",
-        "engine": engine_used.as_str(),
+        "engine": resolved_engine_name,
         "voice": voice_used.as_str(),
+        "language": language_used,
         "format": "f32le",
         "sample_rate_hz": sample_rate,
         "channels": DEFAULT_CHANNELS,
         "sample_count": sample_count,
         "duration_ms": duration_ms,
         "chunk_count": chunk_index,
-        "native_streaming": matches!(engine_used, CachedTtsEngine::Pocket | CachedTtsEngine::Qwen | CachedTtsEngine::QwenLarge)
+        "native_streaming": native_streaming_engine(resolved_engine_name)
     }))
 }
 
@@ -857,76 +836,15 @@ fn duration_ms_for_samples(sample_count: usize, sample_rate: u32) -> u64 {
     }
 }
 
-fn ensure_tts_instance(
-    state: &mut BridgeState,
-    requested: RequestedTtsEngine,
-) -> Result<CachedTtsEngine, RpcError> {
-    match requested {
-        RequestedTtsEngine::Auto => {
-            if let Some(current) = state.tts_engine {
-                return Ok(current);
-            }
-
-            if TextToSpeech::can_run_qwen() {
-                if let Ok(tts) = TextToSpeech::with_engine(TtsEngine::Qwen) {
-                    state.tts = Some(tts);
-                    state.tts_engine = Some(CachedTtsEngine::Qwen);
-                    return Ok(CachedTtsEngine::Qwen);
-                }
-            }
-
-            match TextToSpeech::with_engine(TtsEngine::Pocket) {
-                Ok(tts) => {
-                    state.tts = Some(tts);
-                    state.tts_engine = Some(CachedTtsEngine::Pocket);
-                    Ok(CachedTtsEngine::Pocket)
-                }
-                Err(pocket_err) => {
-                    eprintln!(
-                        "[bridge] auto TTS fallback: pocket init failed ({pocket_err}), trying kokoro"
-                    );
-
-                    match TextToSpeech::with_engine(TtsEngine::Kokoro) {
-                        Ok(kokoro) => {
-                            state.tts = Some(kokoro);
-                            state.tts_engine = Some(CachedTtsEngine::Kokoro);
-                            Ok(CachedTtsEngine::Kokoro)
-                        }
-                        Err(kokoro_err) => {
-                            eprintln!(
-                                "[bridge] auto TTS fallback: kokoro init failed ({kokoro_err}), trying supertonic"
-                            );
-
-                            let supertonic = TextToSpeech::with_engine(TtsEngine::Supertonic)
-                                .map_err(map_tts_error)?;
-                            state.tts = Some(supertonic);
-                            state.tts_engine = Some(CachedTtsEngine::Supertonic);
-                            Ok(CachedTtsEngine::Supertonic)
-                        }
-                    }
-                }
-            }
-        }
-        RequestedTtsEngine::Pocket => set_tts_engine(state, CachedTtsEngine::Pocket),
-        RequestedTtsEngine::Supertonic => set_tts_engine(state, CachedTtsEngine::Supertonic),
-        RequestedTtsEngine::Kokoro => set_tts_engine(state, CachedTtsEngine::Kokoro),
-        RequestedTtsEngine::Qwen => set_tts_engine(state, CachedTtsEngine::Qwen),
-        RequestedTtsEngine::QwenLarge => set_tts_engine(state, CachedTtsEngine::QwenLarge),
-    }
-}
-
-fn set_tts_engine(
-    state: &mut BridgeState,
-    target: CachedTtsEngine,
-) -> Result<CachedTtsEngine, RpcError> {
-    if state.tts_engine == Some(target) {
-        return Ok(target);
+fn ensure_tts_instance(state: &mut BridgeState, requested: TtsEngine) -> Result<(), RpcError> {
+    if state.tts_requested_engine.as_ref() == Some(&requested) && state.tts.is_some() {
+        return Ok(());
     }
 
-    let tts = TextToSpeech::with_engine(target.as_jack_voice_engine()).map_err(map_tts_error)?;
+    let tts = TextToSpeech::with_engine(requested.clone()).map_err(map_tts_error)?;
     state.tts = Some(tts);
-    state.tts_engine = Some(target);
-    Ok(target)
+    state.tts_requested_engine = Some(requested);
+    Ok(())
 }
 
 fn parse_stt_mode(mode: Option<&str>) -> Result<SttMode, RpcError> {
@@ -942,21 +860,23 @@ fn parse_stt_mode(mode: Option<&str>) -> Result<SttMode, RpcError> {
     }
 }
 
-fn parse_tts_engine(engine: Option<&str>) -> Result<RequestedTtsEngine, RpcError> {
+fn parse_tts_engine(engine: Option<&str>) -> Result<TtsEngine, RpcError> {
     let engine = engine.unwrap_or("auto").trim().to_ascii_lowercase();
 
     match engine.as_str() {
-        "auto" => Ok(RequestedTtsEngine::Auto),
-        "pocket" => Ok(RequestedTtsEngine::Pocket),
-        "supertonic" => Ok(RequestedTtsEngine::Supertonic),
-        "kokoro" => Ok(RequestedTtsEngine::Kokoro),
-        "qwen" => Ok(RequestedTtsEngine::Qwen),
-        "qwen-large" | "qwenlarge" => Ok(RequestedTtsEngine::QwenLarge),
+        "auto" => Ok(TtsEngine::Auto),
+        "pocket" => Ok(TtsEngine::Pocket),
+        "supertonic" => Ok(TtsEngine::Supertonic),
+        "kokoro" => Ok(TtsEngine::Kokoro),
         other => Err(RpcError::new(
             ErrorCode::InvalidParams,
             format!("Unsupported tts engine '{other}'"),
         )),
     }
+}
+
+fn native_streaming_engine(engine: &str) -> bool {
+    matches!(engine, "pocket" | "qwen3")
 }
 
 fn stt_backend_name(stt: &SpeechToText) -> &'static str {
@@ -1042,12 +962,17 @@ mod tests {
     fn parse_tts_engine_accepts_pocket() {
         assert!(matches!(
             parse_tts_engine(Some("pocket")),
-            Ok(RequestedTtsEngine::Pocket)
+            Ok(TtsEngine::Pocket)
         ));
         assert!(matches!(
             parse_tts_engine(Some("POCKET")),
-            Ok(RequestedTtsEngine::Pocket)
+            Ok(TtsEngine::Pocket)
         ));
+    }
+
+    #[test]
+    fn parse_tts_engine_accepts_auto() {
+        assert!(matches!(parse_tts_engine(None), Ok(TtsEngine::Auto)));
     }
 
     #[test]

@@ -73,6 +73,9 @@ pub struct SessionConfig {
     pub voice: Option<String>,
 
     #[serde(default)]
+    pub language: Option<String>,
+
+    #[serde(default)]
     pub turn_detection: Option<TurnDetection>,
 
     #[serde(default)]
@@ -229,6 +232,9 @@ pub struct ResponseConfig {
 
     #[serde(default)]
     pub voice: Option<String>,
+
+    #[serde(default)]
+    pub language: Option<String>,
 
     #[serde(default)]
     pub tools: Option<Vec<serde_json::Value>>,
@@ -525,6 +531,7 @@ mod tests {
                     "silence_duration_ms": 500
                 },
                 "voice": "alloy",
+                "language": "it",
                 "model": "gpt-realtime"
             }
         }"#;
@@ -533,6 +540,7 @@ mod tests {
         match event {
             ClientEvent::SessionUpdate(update) => {
                 assert_eq!(update.session.voice, Some("alloy".to_string()));
+                assert_eq!(update.session.language, Some("it".to_string()));
                 assert_eq!(update.session.model, Some("gpt-realtime".to_string()));
                 let td = update.session.turn_detection.unwrap();
                 assert_eq!(td.detection_type, Some("server_vad".to_string()));
@@ -564,16 +572,19 @@ mod tests {
             "type": "response.create",
             "response": {
                 "modalities": ["audio", "text"],
-                "voice": "alloy"
+                "voice": "alloy",
+                "language": "it"
             }
         }"#;
 
         let event: ClientEvent = serde_json::from_str(json).unwrap();
         match event {
             ClientEvent::ResponseCreate(create) => {
-                let modalities = create.response.unwrap().modalities.unwrap();
+                let response = create.response.unwrap();
+                let modalities = response.modalities.unwrap();
                 assert!(modalities.contains(&"audio".to_string()));
                 assert!(modalities.contains(&"text".to_string()));
+                assert_eq!(response.language, Some("it".to_string()));
             }
             _ => panic!("Expected ResponseCreate"),
         }

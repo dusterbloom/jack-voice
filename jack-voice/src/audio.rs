@@ -225,11 +225,23 @@ pub struct AudioPlayer {
     _stream: OutputStream,
     handle: rodio::OutputStreamHandle,
     sink: Sink,
+    /// Native sample rate of the output device. We resample to this rate
+    /// before feeding rodio, because rodio 0.19's built-in resampler produces
+    /// garbage audio for non-trivial ratios (e.g. 24000→44100).
+    device_rate: u32,
 }
 
 impl AudioPlayer {
     /// Create a new audio player
     pub fn new() -> Result<Self, AudioError> {
+        let device_rate = {
+            use cpal::traits::{DeviceTrait, HostTrait};
+            let host = cpal::default_host();
+            host.default_output_device()
+                .and_then(|dev| dev.default_output_config().ok())
+                .map(|c| c.sample_rate().0)
+                .unwrap_or(44100)
+        };
         let (stream, handle) =
             OutputStream::try_default().map_err(|_e| AudioError::NoOutputDevice)?;
 
@@ -239,12 +251,21 @@ impl AudioPlayer {
             _stream: stream,
             handle,
             sink,
+            device_rate,
         })
     }
 
-    /// Play audio samples (non-blocking)
+    /// Play audio samples (non-blocking).
+    ///
+    /// Resamples to the device's native rate using rubato before feeding to
+    /// rodio, bypassing rodio's broken built-in resampler.
     pub fn play(&self, samples: Vec<f32>, sample_rate: u32) {
-        let source = SamplesBuffer::new(1, sample_rate, samples);
+        let samples = if sample_rate != self.device_rate {
+            resample_simple(&samples, sample_rate, self.device_rate)
+        } else {
+            samples
+        };
+        let source = SamplesBuffer::new(1, self.device_rate, samples);
         self.sink.append(source);
     }
 
@@ -396,6 +417,31 @@ pub fn resample(samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32>
 
 /// Resampler that persists across calls to avoid re-allocating sinc tables.
 /// Expects fixed-size input chunks (e.g., audio callback frames).
+/// Resample using linear interpolation. Simple, artifact-free, good enough
+/// for speech. Bypasses rodio 0.19's broken built-in resampler.
+fn resample_simple(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || from_rate == to_rate {
+        return samples.to_vec();
+    }
+    let ratio = from_rate as f64 / to_rate as f64;
+    let out_len = ((samples.len() as f64 / ratio).ceil()) as usize;
+    let mut output = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let src_pos = i as f64 * ratio;
+        let idx = src_pos as usize;
+        let frac = src_pos - idx as f64;
+        let s = if idx + 1 < samples.len() {
+            samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac
+        } else if idx < samples.len() {
+            samples[idx] as f64
+        } else {
+            0.0
+        };
+        output.push(s as f32);
+    }
+    output
+}
+
 pub struct PersistentResampler {
     resampler: rubato::SincFixedIn<f32>,
     chunk_size: usize,

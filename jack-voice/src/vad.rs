@@ -54,8 +54,8 @@ impl Default for VadConfig {
         Self {
             sample_rate: 16000,
             threshold: 0.30, // Lowered from 0.45: energy gating handles noise, threshold catches soft consonants
-            min_silence_duration: 2.5, // 1.75s - generous pause tolerance for natural speech
-            min_speech_duration: 0.15, // Increased from 0.15s to prevent detecting brief noise as speech
+            min_silence_duration: 0.8, // 0.8s — fast turn detection for conversational voice
+            min_speech_duration: 0.15, // Minimum to prevent detecting brief noise as speech
             window_size: 512i32,
         }
     }

@@ -7,14 +7,13 @@ use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use tracing::{info, error, warn};
+use tracing::{error, info, warn};
 
 use crate::protocol::{
-    ClientEvent, ServerEvent, SessionCreated,
-    InputAudioBufferSpeechStopped, ResponseAudioDelta, ResponseDone,
-    ConversationItemAdded,
+    ClientEvent, ConversationItemAdded, InputAudioBufferSpeechStopped, ResponseAudioDelta,
+    ResponseDone, ServerEvent, SessionCreated,
 };
-use crate::session::{SessionManager, CreateSessionRequest, UpdateSessionRequest};
+use crate::session::{CreateSessionRequest, SessionManager, UpdateSessionRequest};
 
 pub struct RealtimeServer {
     listener: TcpListener,
@@ -37,7 +36,7 @@ impl RealtimeServer {
     pub async fn run(self) -> anyhow::Result<()> {
         let session_manager = self.session_manager.clone();
         let broadcast_tx = self.broadcast_tx.clone();
-        
+
         while let Ok((stream, addr)) = self.listener.accept().await {
             let sm = session_manager.clone();
             let bt = broadcast_tx.clone();
@@ -99,7 +98,14 @@ async fn handle_connection(
     while let Some(msg_result) = ws_receiver.next().await {
         match msg_result {
             Ok(Message::Text(text)) => {
-                if let Err(e) = handle_message(&text, &session_id, session_manager.as_ref(), event_sender.clone()).await {
+                if let Err(e) = handle_message(
+                    &text,
+                    &session_id,
+                    session_manager.as_ref(),
+                    event_sender.clone(),
+                )
+                .await
+                {
                     warn!("Error handling message: {}", e);
                 }
             }
@@ -129,14 +135,16 @@ async fn handle_message(
     let event: ClientEvent = serde_json::from_str(text)?;
     match event {
         ClientEvent::SessionUpdate(update) => {
-            session_manager.update_session(
-                session_id,
-                UpdateSessionRequest {
-                    state: Some(crate::protocol::SessionState::Ready),
-                    config: Some(serde_json::json!(update.session)),
-                    metadata: None,
-                },
-            ).await?;
+            session_manager
+                .update_session(
+                    session_id,
+                    UpdateSessionRequest {
+                        state: Some(crate::protocol::SessionState::Ready),
+                        config: Some(serde_json::json!(update.session)),
+                        metadata: None,
+                    },
+                )
+                .await?;
             let event = ServerEvent::SessionUpdated(crate::protocol::SessionUpdated {
                 session: Some(serde_json::json!({
                     "id": session_id,
@@ -146,11 +154,16 @@ async fn handle_message(
             event_sender.send(serde_json::to_string(&event)?).await?;
         }
         ClientEvent::InputAudioBufferAppend(append) => {
-            let _audio_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &append.audio_data);
+            let _audio_bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &append.audio_data,
+            );
             info!("Received audio buffer");
         }
         ClientEvent::InputAudioBufferCommit => {
-            let event = ServerEvent::InputAudioBufferSpeechStopped(InputAudioBufferSpeechStopped { audio_end_ms: 1000 });
+            let event = ServerEvent::InputAudioBufferSpeechStopped(InputAudioBufferSpeechStopped {
+                audio_end_ms: 1000,
+            });
             event_sender.send(serde_json::to_string(&event)?).await?;
         }
         ClientEvent::InputAudioBufferClear => {}
@@ -170,7 +183,10 @@ async fn handle_message(
         }
         ClientEvent::ConversationItemCreate(item_create) => {
             let event = ServerEvent::ConversationItemAdded(ConversationItemAdded {
-                item: item_create.item.map(|i| serde_json::to_value(i).ok()).flatten(),
+                item: item_create
+                    .item
+                    .map(|i| serde_json::to_value(i).ok())
+                    .flatten(),
                 previous_item_id: item_create.previous_item_id,
             });
             event_sender.send(serde_json::to_string(&event)?).await?;
@@ -178,15 +194,20 @@ async fn handle_message(
         ClientEvent::ResponseCancel => {}
         ClientEvent::SessionCommit => {}
         ClientEvent::ConversationItemDelete(delete) => {
-            let event = ServerEvent::ConversationItemDeleted(crate::protocol::ConversationItemDeleted { id: delete.id });
+            let event =
+                ServerEvent::ConversationItemDeleted(crate::protocol::ConversationItemDeleted {
+                    id: delete.id,
+                });
             event_sender.send(serde_json::to_string(&event)?).await?;
         }
         ClientEvent::ConversationItemTruncate(truncate) => {
-            let event = ServerEvent::ConversationItemTruncated(crate::protocol::ConversationItemTruncated {
-                id: truncate.id,
-                content_index: truncate.content_index,
-                end_index: truncate.end_index,
-            });
+            let event = ServerEvent::ConversationItemTruncated(
+                crate::protocol::ConversationItemTruncated {
+                    id: truncate.id,
+                    content_index: truncate.content_index,
+                    end_index: truncate.end_index,
+                },
+            );
             event_sender.send(serde_json::to_string(&event)?).await?;
         }
     }

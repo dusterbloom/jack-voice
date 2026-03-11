@@ -52,7 +52,13 @@ export interface AudioRequestOptions extends BaseRequestOptions {
   channels?: number;
 }
 
-export interface TtsOptions extends BaseRequestOptions {}
+export interface TtsOptions extends BaseRequestOptions {
+  voice?: string;
+  language?: string;
+  engine?: "auto" | "pocket" | "supertonic" | "kokoro" | "qwen3";
+  speed?: number;
+  timeoutMs?: number;
+}
 
 export type AudioInput = Buffer | ArrayBuffer | ArrayBufferView;
 export type VadResult = Record<string, unknown>;
@@ -582,6 +588,8 @@ function buildProcessEnv(options: {
   });
   const loaderVar = loaderSearchVar();
   env[loaderVar] = prependPaths(env[loaderVar], runtimeDirs);
+  env.LIBTORCH_USE_PYTORCH = env.LIBTORCH_USE_PYTORCH || "1";
+  env.LIBTORCH_BYPASS_VERSION_CHECK = env.LIBTORCH_BYPASS_VERSION_CHECK || "1";
 
   if (isWsl() && !env.PULSE_SERVER && existsSync("/mnt/wslg/PulseServer")) {
     env.PULSE_SERVER = "unix:/mnt/wslg/PulseServer";
@@ -622,6 +630,10 @@ function discoverRuntimeDirs(options: {
   }
 
   for (const candidate of candidateRuntimeDirs(options.cwd)) {
+    dirs.push(candidate);
+  }
+
+  for (const candidate of candidateTorchRuntimeDirs(options.cwd, options.env)) {
     dirs.push(candidate);
   }
 
@@ -673,6 +685,37 @@ function candidateRuntimeDirs(cwd?: string): string[] {
       }
     }
   }
+  return dedupe(candidates);
+}
+
+function candidateTorchRuntimeDirs(
+  cwd: string | undefined,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const candidates: string[] = [];
+  const explicit = String(env.JACK_VOICE_TORCH_LIB_DIR ?? "").trim();
+  if (explicit && existsSync(explicit)) {
+    candidates.push(explicit);
+  }
+
+  for (const root of candidateRoots(cwd)) {
+    for (const dir of [
+      path.join(
+        root,
+        ".venv312",
+        "lib",
+        "python3.12",
+        "site-packages",
+        "torch",
+        "lib",
+      ),
+    ]) {
+      if (existsSync(dir)) {
+        candidates.push(dir);
+      }
+    }
+  }
+
   return dedupe(candidates);
 }
 

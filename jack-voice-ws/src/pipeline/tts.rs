@@ -9,6 +9,7 @@ pub struct RealtimeTts {
     inner: Option<TextToSpeech>,
     engine: TtsEngine,
     voice: Option<String>,
+    language: Option<String>,
     speed: f32,
 }
 
@@ -17,8 +18,9 @@ impl RealtimeTts {
         let inner = TextToSpeech::new()?;
         Ok(Self {
             inner: Some(inner),
-            engine: TtsEngine::Pocket,
+            engine: TtsEngine::Auto,
             voice: None,
+            language: None,
             speed: 1.0,
         })
     }
@@ -29,6 +31,7 @@ impl RealtimeTts {
             inner: Some(inner),
             engine,
             voice: None,
+            language: None,
             speed: 1.0,
         })
     }
@@ -37,8 +40,11 @@ impl RealtimeTts {
     pub fn synthesize(&mut self, text: &str) -> Result<AudioOutput, TtsError> {
         match &mut self.inner {
             Some(tts) => {
+                if let Some(language) = &self.language {
+                    tts.set_language(language)?;
+                }
                 if let Some(voice) = &self.voice {
-                    let _ = tts.set_speaker(voice);
+                    tts.set_speaker(voice)?;
                 }
                 tts.set_speed(self.speed);
                 tts.synthesize(text)
@@ -48,14 +54,17 @@ impl RealtimeTts {
     }
 
     /// Synthesize with streaming callback
-    pub fn synthesize_streaming<F>(&mut self, text: &str, mut callback: F) -> Result<u32, TtsError>
+    pub fn synthesize_streaming<F>(&mut self, text: &str, callback: F) -> Result<u32, TtsError>
     where
         F: FnMut(&[f32], u32) -> bool,
     {
         match &mut self.inner {
             Some(tts) => {
+                if let Some(language) = &self.language {
+                    tts.set_language(language)?;
+                }
                 if let Some(voice) = &self.voice {
-                    let _ = tts.set_speaker(voice);
+                    tts.set_speaker(voice)?;
                 }
                 tts.set_speed(self.speed);
                 tts.synthesize_streaming(text, callback)
@@ -69,6 +78,15 @@ impl RealtimeTts {
         self.voice = Some(voice.to_string());
         if let Some(tts) = &mut self.inner {
             tts.set_speaker(voice)?;
+        }
+        Ok(())
+    }
+
+    /// Set language
+    pub fn set_language(&mut self, language: &str) -> Result<(), TtsError> {
+        self.language = Some(language.to_string());
+        if let Some(tts) = &mut self.inner {
+            tts.set_language(language)?;
         }
         Ok(())
     }

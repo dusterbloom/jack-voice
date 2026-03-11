@@ -1,11 +1,14 @@
+use anyhow::Result;
+use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::Result;
 use tokio::sync::RwLock;
-use sqlx::{SqlitePool, Row, sqlite::SqlitePoolOptions};
 
+use super::{
+    Conversation, ConversationItem, CreateSessionRequest, CreateSessionResponse,
+    GetSessionResponse, Session, UpdateSessionRequest,
+};
 use crate::protocol::SessionState;
-use super::{Session, ConversationItem, CreateSessionRequest, CreateSessionResponse, Conversation, UpdateSessionRequest, GetSessionResponse};
 
 pub struct SessionManager {
     pool: SqlitePool,
@@ -107,7 +110,7 @@ impl SessionManager {
                 conversation_id TEXT,
                 metadata TEXT,
                 expires_at INTEGER
-            )"
+            )",
         )
         .execute(&self.pool)
         .await?;
@@ -118,7 +121,7 @@ impl SessionManager {
                 session_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
-            )"
+            )",
         )
         .execute(&self.pool)
         .await?;
@@ -132,7 +135,7 @@ impl SessionManager {
                 content TEXT,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
-            )"
+            )",
         )
         .execute(&self.pool)
         .await?;
@@ -140,32 +143,38 @@ impl SessionManager {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
             .execute(&self.pool)
             .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id)")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_conversation ON sessions(conversation_id)",
+        )
+        .execute(&self.pool)
+        .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_conversation_items_session ON conversation_items(session_id)")
             .execute(&self.pool)
             .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id)")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id)",
+        )
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }
 
     pub async fn create_session(&self, req: CreateSessionRequest) -> Result<CreateSessionResponse> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs() as i64;
-        
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+
         let session_id = req.id.unwrap_or_else(|| format!("sess_{}", uuid_v4()));
         let conversation_id = format!("conv_{}", uuid_v4());
-        
-        let config = req.config.map(|c| serde_json::to_string(&c).unwrap_or_default());
-        let metadata = req.metadata.map(|m| serde_json::to_string(&m).unwrap_or_default());
-        
+
+        let config = req
+            .config
+            .map(|c| serde_json::to_string(&c).unwrap_or_default());
+        let metadata = req
+            .metadata
+            .map(|m| serde_json::to_string(&m).unwrap_or_default());
+
         let expires_at = req.expires_in_seconds.map(|s| now + s);
-        
+
         // Insert session
         sqlx::query(
             "INSERT INTO sessions (id, created_at, updated_at, state, config, conversation_id, metadata, expires_at) 
@@ -183,14 +192,12 @@ impl SessionManager {
         .await?;
 
         // Insert conversation
-        sqlx::query(
-            "INSERT INTO conversations (id, session_id, created_at) VALUES (?, ?, ?)"
-        )
-        .bind(&conversation_id)
-        .bind(&session_id)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO conversations (id, session_id, created_at) VALUES (?, ?, ?)")
+            .bind(&conversation_id)
+            .bind(&session_id)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
 
         let session = Session {
             id: session_id.clone(),
@@ -231,7 +238,7 @@ impl SessionManager {
         }
 
         // Load from database
-        let row: (String, i64, i64, String, Option<String>, Option<String>, Option<String>, Option<i64>) = 
+        let row: (String, i64, i64, String, Option<String>, Option<String>, Option<String>, Option<i64>) =
             sqlx::query_as(
                 "SELECT id, created_at, updated_at, state, config, conversation_id, metadata, expires_at 
                  FROM sessions WHERE id = ?"
@@ -240,7 +247,10 @@ impl SessionManager {
             .fetch_one(&self.pool)
             .await?;
 
-        let state: SessionState = row.3.as_str().try_into()
+        let state: SessionState = row
+            .3
+            .as_str()
+            .try_into()
             .unwrap_or(SessionState::Connecting);
 
         let session = Session {
@@ -255,7 +265,10 @@ impl SessionManager {
         };
 
         // Update cache
-        self.cache.write().await.put(session_id.to_string(), session.clone());
+        self.cache
+            .write()
+            .await
+            .put(session_id.to_string(), session.clone());
 
         let items = self.get_conversation_items(session_id).await?;
 
@@ -272,28 +285,35 @@ impl SessionManager {
     async fn get_conversation_items(&self, session_id: &str) -> Result<Vec<ConversationItem>> {
         let rows = sqlx::query_as(
             "SELECT id, session_id, item_type, role, content, created_at 
-             FROM conversation_items WHERE session_id = ? ORDER BY created_at"
+             FROM conversation_items WHERE session_id = ? ORDER BY created_at",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|row: (String, String, String, Option<String>, Option<String>, i64)| {
-            ConversationItem {
-                id: row.0,
-                session_id: row.1,
-                item_type: row.2,
-                role: row.3,
-                content: row.4,
-                created_at: row.5,
-            }
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(
+                |row: (String, String, String, Option<String>, Option<String>, i64)| {
+                    ConversationItem {
+                        id: row.0,
+                        session_id: row.1,
+                        item_type: row.2,
+                        role: row.3,
+                        content: row.4,
+                        created_at: row.5,
+                    }
+                },
+            )
+            .collect())
     }
 
-    pub async fn update_session(&self, session_id: &str, req: UpdateSessionRequest) -> Result<Session> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs() as i64;
+    pub async fn update_session(
+        &self,
+        session_id: &str,
+        req: UpdateSessionRequest,
+    ) -> Result<Session> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         // Build and execute updates based on what was provided
         if let Some(state) = &req.state {
@@ -332,10 +352,14 @@ impl SessionManager {
         Ok(self.get_session(session_id).await?.session)
     }
 
-    pub async fn add_conversation_item(&self, session_id: &str, item: ConversationItem) -> Result<()> {
+    pub async fn add_conversation_item(
+        &self,
+        session_id: &str,
+        item: ConversationItem,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO conversation_items (id, session_id, item_type, role, content, created_at) 
-             VALUES (?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&item.id)
         .bind(session_id)
@@ -378,14 +402,13 @@ impl SessionManager {
     }
 
     pub async fn cleanup_expired(&self) -> Result<u64> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs() as i64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
-        let result = sqlx::query("SELECT id FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?")
-            .bind(now)
-            .fetch_all(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("SELECT id FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?")
+                .bind(now)
+                .fetch_all(&self.pool)
+                .await?;
 
         let mut deleted = 0u64;
         for row in result {
@@ -432,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_get_session() {
         let manager = SessionManager::new_in_memory().await.unwrap();
-        
+
         let req = CreateSessionRequest {
             id: Some("test_session".to_string()),
             config: Some(serde_json::json!({"voice": "alloy"})),
@@ -441,11 +464,11 @@ mod tests {
         };
 
         let response = manager.create_session(req).await.unwrap();
-        
+
         assert_eq!(response.session.id, "test_session");
         assert_eq!(response.session.state, SessionState::Connecting);
         assert!(response.conversation.id.starts_with("conv_"));
-        
+
         let retrieved = manager.get_session("test_session").await.unwrap();
         assert_eq!(retrieved.session.state, SessionState::Connecting);
     }
@@ -453,22 +476,28 @@ mod tests {
     #[tokio::test]
     async fn test_update_session() {
         let manager = SessionManager::new_in_memory().await.unwrap();
-        
-        manager.create_session(CreateSessionRequest {
-            id: Some("update_test".to_string()),
-            config: None,
-            metadata: None,
-            expires_in_seconds: None,
-        }).await.unwrap();
 
-        let updated = manager.update_session(
-            "update_test", 
-            UpdateSessionRequest {
-                state: Some(SessionState::Ready),
-                config: Some(serde_json::json!({"voice": "shimmer"})),
+        manager
+            .create_session(CreateSessionRequest {
+                id: Some("update_test".to_string()),
+                config: None,
                 metadata: None,
-            }
-        ).await.unwrap();
+                expires_in_seconds: None,
+            })
+            .await
+            .unwrap();
+
+        let updated = manager
+            .update_session(
+                "update_test",
+                UpdateSessionRequest {
+                    state: Some(SessionState::Ready),
+                    config: Some(serde_json::json!({"voice": "shimmer"})),
+                    metadata: None,
+                },
+            )
+            .await
+            .unwrap();
 
         assert_eq!(updated.state, SessionState::Ready);
     }
@@ -476,30 +505,36 @@ mod tests {
     #[tokio::test]
     async fn test_add_conversation_item() {
         let manager = SessionManager::new_in_memory().await.unwrap();
-        
-        manager.create_session(CreateSessionRequest {
-            id: Some("item_test".to_string()),
-            config: None,
-            metadata: None,
-            expires_in_seconds: None,
-        }).await.unwrap();
+
+        manager
+            .create_session(CreateSessionRequest {
+                id: Some("item_test".to_string()),
+                config: None,
+                metadata: None,
+                expires_in_seconds: None,
+            })
+            .await
+            .unwrap();
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
-        manager.add_conversation_item(
-            "item_test",
-            ConversationItem {
-                id: "msg_1".to_string(),
-                session_id: "item_test".to_string(),
-                item_type: "message".to_string(),
-                role: Some("user".to_string()),
-                content: Some(r#"{"text":"Hello"}"#.to_string()),
-                created_at: now,
-            }
-        ).await.unwrap();
+        manager
+            .add_conversation_item(
+                "item_test",
+                ConversationItem {
+                    id: "msg_1".to_string(),
+                    session_id: "item_test".to_string(),
+                    item_type: "message".to_string(),
+                    role: Some("user".to_string()),
+                    content: Some(r#"{"text":"Hello"}"#.to_string()),
+                    created_at: now,
+                },
+            )
+            .await
+            .unwrap();
 
         let session = manager.get_session("item_test").await.unwrap();
         assert_eq!(session.items.len(), 1);
@@ -509,16 +544,19 @@ mod tests {
     #[tokio::test]
     async fn test_delete_session() {
         let manager = SessionManager::new_in_memory().await.unwrap();
-        
-        manager.create_session(CreateSessionRequest {
-            id: Some("delete_test".to_string()),
-            config: None,
-            metadata: None,
-            expires_in_seconds: None,
-        }).await.unwrap();
+
+        manager
+            .create_session(CreateSessionRequest {
+                id: Some("delete_test".to_string()),
+                config: None,
+                metadata: None,
+                expires_in_seconds: None,
+            })
+            .await
+            .unwrap();
 
         manager.delete_session("delete_test").await.unwrap();
-        
+
         let result = manager.get_session("delete_test").await;
         assert!(result.is_err());
     }

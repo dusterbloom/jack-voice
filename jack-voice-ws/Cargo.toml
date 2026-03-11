@@ -3,6 +3,9 @@ name = "jack-voice-ws"
 version.workspace = true
 edition = "2021"
 
+[lib]
+doctest = false
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
