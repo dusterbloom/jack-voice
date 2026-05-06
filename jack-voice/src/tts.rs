@@ -12,12 +12,42 @@ use supertonic::{TextToSpeech as SupertonicTts, VoiceStyleData};
 use crate::kokoro_tts::KokoroTts;
 use crate::models;
 
-const POCKET_MODEL_VARIANT: &str = "b6369a24";
 const POCKET_DEFAULT_VOICE: &str = "alba";
+const POCKET_DEFAULT_VARIANT: &str = "english";
 const KOKORO_DEFAULT_VOICE: &str = "0";
 const SUPERTONIC_DEFAULT_VOICE: &str = "F1";
+
+/// All known model variants with their language code and description.
+const POCKET_VARIANTS: &[(&str, &str, &str)] = &[
+    ("b6369a24", "en", "Legacy English"),
+    ("english", "en", "English"),
+    ("english_2026-01", "en", "English (Jan 2026)"),
+    ("english_2026-04", "en", "English (Apr 2026)"),
+    ("french_24l", "fr", "French (24-layer)"),
+    ("german", "de", "German"),
+    ("german_24l", "de", "German (24-layer)"),
+    ("italian", "it", "Italian"),
+    ("italian_24l", "it", "Italian (24-layer)"),
+    ("portuguese", "pt", "Portuguese"),
+    ("portuguese_24l", "pt", "Portuguese (24-layer)"),
+    ("spanish", "es", "Spanish"),
+    ("spanish_24l", "es", "Spanish (24-layer)"),
+];
+
+/// Default voice per language code.
+const POCKET_LANG_DEFAULT_VOICES: &[(&str, &str)] = &[
+    ("en", "alba"),
+    ("fr", "estelle"),
+    ("de", "juergen"),
+    ("it", "giovanni"),
+    ("pt", "rafael"),
+    ("es", "lola"),
+];
 const POCKET_VOICES: &[&str] = &[
     "alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma",
+    "estelle", "juergen", "giovanni", "rafael", "lola",
+    "arnaud", "fabienne", "hans", "katja", "lucia", "marco", "miguel", "sofia",
+    "alejandro", "camille", "giuseppe", "heinrich", "isabela",
 ];
 
 /// Audio output from TTS
@@ -47,6 +77,7 @@ struct PocketTts {
     model: PocketTtsModel,
     voice_state: PocketModelState,
     voice_id: String,
+    variant: String,
 }
 
 #[derive(Debug)]
@@ -57,20 +88,20 @@ enum PocketVoiceInput<'a> {
 }
 
 impl PocketTts {
-    fn new_with_voice(voice_id: &str) -> Result<Self, TtsError> {
-        let model = PocketTtsModel::load(POCKET_MODEL_VARIANT)
-            .map_err(|e| TtsError::InitError(format!("Pocket init failed: {}", e)))?;
-        let voice_state = load_pocket_voice_state(&model, voice_id)?;
+    fn new_with_voice(variant: &str, voice_id: &str) -> Result<Self, anyhow::Error> {
+        let model = PocketTtsModel::load(variant)?;
+        let voice_state = load_pocket_voice_state(&model, voice_id, variant)?;
 
         Ok(Self {
             model,
             voice_state,
             voice_id: voice_id.to_string(),
+            variant: variant.to_string(),
         })
     }
 
     fn set_voice(&mut self, voice_id: &str) -> Result<(), TtsError> {
-        self.voice_state = load_pocket_voice_state(&self.model, voice_id)?;
+        self.voice_state = load_pocket_voice_state(&self.model, voice_id, &self.variant)?;
         self.voice_id = voice_id.to_string();
         Ok(())
     }
@@ -95,7 +126,7 @@ impl PocketTts {
     where
         F: FnMut(&[f32], u32) -> bool,
     {
-        for chunk in self.model.generate_stream(text, &self.voice_state) {
+        for chunk in self.model.generate_stream_long(text, &self.voice_state) {
             let chunk = chunk.map_err(|e| {
                 TtsError::SynthesisError(format!("Pocket streaming synthesis failed: {}", e))
             })?;
@@ -120,16 +151,28 @@ impl PocketTts {
     }
 }
 
+fn pocket_voice_embedding_hf_path(voice_id: &str, variant: &str) -> String {
+    if variant == "b6369a24" {
+        format!(
+            "hf://kyutai/pocket-tts-without-voice-cloning/embeddings/{}.safetensors",
+            voice_id
+        )
+    } else {
+        format!(
+            "hf://kyutai/pocket-tts-without-voice-cloning/languages/{}/embeddings/{}.safetensors",
+            variant, voice_id
+        )
+    }
+}
+
 fn load_pocket_voice_state(
     model: &PocketTtsModel,
     voice_id: &str,
+    variant: &str,
 ) -> Result<PocketModelState, TtsError> {
     match classify_pocket_voice_input(voice_id)? {
         PocketVoiceInput::Preset(preset_voice_id) => {
-            let prompt_hf_path = format!(
-                "hf://kyutai/pocket-tts-without-voice-cloning/embeddings/{}.safetensors",
-                preset_voice_id
-            );
+            let prompt_hf_path = pocket_voice_embedding_hf_path(preset_voice_id, variant);
             let prompt_path =
                 pocket_tts::weights::download_if_necessary(&prompt_hf_path).map_err(|e| {
                     TtsError::ModelNotFound(format!(
@@ -203,12 +246,105 @@ fn classify_pocket_voice_input<'a>(voice_id: &'a str) -> Result<PocketVoiceInput
     }
 }
 
+fn pocket_variant_for_language(lang: &str) -> Result<(&'static str, &'static str), TtsError> {
+    // Prefer 24-layer variants when available (higher quality)
+    match lang {
+        "en" | "english" => Ok(("english", "alba")),
+        "fr" | "french" => Ok(("french_24l", "estelle")),
+        "de" | "german" => Ok(("german_24l", "juergen")),
+        "it" | "italian" => Ok(("italian_24l", "giovanni")),
+        "pt" | "portuguese" => Ok(("portuguese_24l", "rafael")),
+        "es" | "spanish" => Ok(("spanish_24l", "lola")),
+        _ => Err(TtsError::InitError(format!(
+            "Unsupported Pocket TTS language: {}",
+            lang
+        ))),
+    }
+}
+
+fn pocket_default_voice_for_variant(variant: &str) -> &'static str {
+    let lang = POCKET_VARIANTS
+        .iter()
+        .find(|(v, _, _)| *v == variant)
+        .map(|(_, l, _)| *l)
+        .unwrap_or("en");
+    POCKET_LANG_DEFAULT_VOICES
+        .iter()
+        .find(|(l, _)| *l == lang)
+        .map(|(_, v)| *v)
+        .unwrap_or("alba")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{classify_pocket_voice_input, PocketVoiceInput, TextToSpeech, TtsEngine, TtsError};
+    use super::{
+        classify_pocket_voice_input, pocket_default_voice_for_variant, pocket_variant_for_language,
+        PocketVoiceInput, TextToSpeech, TtsEngine, TtsError,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pocket_variant_for_language_maps_known_languages() {
+        let cases = [
+            ("en", "english", "alba"),
+            ("english", "english", "alba"),
+            ("fr", "french_24l", "estelle"),
+            ("french", "french_24l", "estelle"),
+            ("de", "german_24l", "juergen"),
+            ("it", "italian_24l", "giovanni"),
+            ("pt", "portuguese_24l", "rafael"),
+            ("es", "spanish_24l", "lola"),
+        ];
+        for (lang, expected_variant, expected_voice) in cases {
+            let (variant, voice) =
+                pocket_variant_for_language(lang).expect("known language should succeed");
+            assert_eq!(variant, expected_variant, "variant mismatch for lang={}", lang);
+            assert_eq!(voice, expected_voice, "voice mismatch for lang={}", lang);
+        }
+    }
+
+    #[test]
+    fn pocket_variant_for_language_rejects_unknown() {
+        let err =
+            pocket_variant_for_language("zz").expect_err("unknown language should fail");
+        match err {
+            TtsError::InitError(msg) => {
+                assert!(msg.contains("Unsupported"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected InitError, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pocket_default_voice_for_variant_returns_expected_defaults() {
+        assert_eq!(pocket_default_voice_for_variant("english"), "alba");
+        assert_eq!(pocket_default_voice_for_variant("french_24l"), "estelle");
+        assert_eq!(pocket_default_voice_for_variant("german_24l"), "juergen");
+        assert_eq!(pocket_default_voice_for_variant("italian_24l"), "giovanni");
+        assert_eq!(pocket_default_voice_for_variant("portuguese_24l"), "rafael");
+        assert_eq!(pocket_default_voice_for_variant("spanish_24l"), "lola");
+    }
+
+    #[test]
+    fn pocket_default_voice_for_variant_falls_back_to_alba() {
+        // Unknown variant should fall back to "alba"
+        assert_eq!(pocket_default_voice_for_variant("nonexistent"), "alba");
+    }
+
+    #[test]
+    fn available_pocket_languages_returns_six_entries() {
+        let langs = TextToSpeech::available_pocket_languages();
+        assert_eq!(langs.len(), 6, "expected 6 languages");
+        let codes: Vec<&str> = langs.iter().map(|(code, _)| *code).collect();
+        assert!(codes.contains(&"en"));
+        assert!(codes.contains(&"fr"));
+        assert!(codes.contains(&"de"));
+        assert!(codes.contains(&"it"));
+        assert!(codes.contains(&"pt"));
+        assert!(codes.contains(&"es"));
+    }
 
     fn unique_temp_file(ext: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -410,6 +546,7 @@ mod tests {
         assert!(voices.iter().any(|v| v.id == 36 && v.name == "im_nicola"));
         assert!(voices.iter().any(|v| v.id == 0 && v.name == "af_alloy"));
     }
+
 }
 
 pub struct TextToSpeech {
@@ -458,14 +595,42 @@ impl TextToSpeech {
         Self::new_pocket_with_voice(POCKET_DEFAULT_VOICE)
     }
 
-    /// Create Pocket TTS instance with specific preset voice
+    /// Create Pocket TTS instance with specific preset voice (defaults to "english" variant)
     pub fn new_pocket_with_voice(voice_id: &str) -> Result<Self, TtsError> {
-        Self::build(
-            TtsEngine::Pocket,
-            TtsEngine::Pocket,
-            voice_id.to_string(),
-            Some("en"),
-        )
+        Self::new_pocket_with_variant_and_voice(POCKET_DEFAULT_VARIANT, voice_id)
+    }
+
+    /// Create Pocket TTS instance for a specific language (picks best variant and default voice)
+    pub fn new_pocket_with_language(lang: &str) -> Result<Self, TtsError> {
+        let (variant, default_voice) = pocket_variant_for_language(lang)?;
+        Self::new_pocket_with_variant_and_voice(variant, default_voice)
+    }
+
+    /// Create Pocket TTS instance with a specific variant (uses default voice for that variant's language)
+    pub fn new_pocket_with_variant(variant: &str) -> Result<Self, TtsError> {
+        let default_voice = pocket_default_voice_for_variant(variant);
+        Self::new_pocket_with_variant_and_voice(variant, default_voice)
+    }
+
+    /// Create Pocket TTS instance with a specific variant and voice
+    pub fn new_pocket_with_variant_and_voice(variant: &str, voice_id: &str) -> Result<Self, TtsError> {
+        let pocket = PocketTts::new_with_voice(variant, voice_id)
+            .map_err(|e| TtsError::InitError(format!("Pocket TTS ({}): {}", variant, e)))?;
+        let sample_rate = pocket.sample_rate();
+        let lang = POCKET_VARIANTS.iter()
+            .find(|(v, _, _)| *v == variant)
+            .map(|(_, l, _)| Some(l.to_string()))
+            .unwrap_or(Some("en".to_string()));
+
+        Ok(Self {
+            engine: TtsImpl::Pocket(pocket),
+            requested_engine: TtsEngine::Pocket,
+            resolved_engine: TtsEngine::Pocket,
+            speaker_id: voice_id.to_string(),
+            speed: 1.0,
+            sample_rate,
+            language: lang,
+        })
     }
 
     /// Create Supertonic TTS instance
@@ -825,6 +990,18 @@ impl TextToSpeech {
         ]
     }
 
+    /// Get available languages for Pocket TTS
+    pub fn available_pocket_languages() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("en", "English"),
+            ("fr", "French"),
+            ("de", "German"),
+            ("it", "Italian"),
+            ("pt", "Portuguese"),
+            ("es", "Spanish"),
+        ]
+    }
+
     /// Get available voices for Supertonic
     pub fn available_supertonic_voices() -> Vec<VoiceInfo> {
         vec![
@@ -885,7 +1062,8 @@ fn build_engine(
     match engine_type {
         TtsEngine::Auto => unreachable!("auto must be resolved before engine build"),
         TtsEngine::Pocket => {
-            let pocket = PocketTts::new_with_voice(speaker_id)?;
+            let pocket = PocketTts::new_with_voice(POCKET_DEFAULT_VARIANT, speaker_id)
+                .map_err(|e| TtsError::InitError(format!("Pocket TTS: {}", e)))?;
             let sample_rate = pocket.sample_rate();
             Ok((TtsImpl::Pocket(pocket), sample_rate))
         }
