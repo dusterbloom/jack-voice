@@ -106,6 +106,12 @@ jv = JackVoice.connect()
 speech = jv.vad(frame_16k)
 text = jv.stt(utterance_16k, language="auto")
 audio = jv.tts("Compilazione completata.", engine="kokoro", voice="35")
+
+magpie = jv.tts(
+    "Compilazione completata.",
+    engine="magpie",
+    voice="sofia@it",
+)
 ```
 
 ### Host CLI Integration Pattern
@@ -161,7 +167,7 @@ Implementation details, acceptance criteria, and rollout gates live in `SPEC.md`
 - Inference core (`jack-voice`):
   - VAD via Silero
   - STT via Moonshine/Whisper/Parakeet
-  - TTS via Supertonic/Kokoro
+  - TTS via Pocket/Supertonic/Kokoro/Qwen/MagPie
 - TTS engine crate (`supertonic`): diffusion-based local synthesis
 - Runtime: `jack-voice-bridge` over `stdin/stdout` NDJSON
 - SDKs: TypeScript + Python wrappers with parity tests (prototype stage)
@@ -169,8 +175,13 @@ Implementation details, acceptance criteria, and rollout gates live in `SPEC.md`
 ## Multilingual Strategy
 
 - English defaults for low-latency developer workflows.
-- Multilingual STT/TTS via Whisper Turbo / Parakeet / Kokoro paths.
+- Multilingual STT/TTS via Whisper Turbo / Parakeet / Kokoro / MagPie paths.
 - Explicit language and voice controls as first-class options in the bridge SDKs.
+
+MagPie notes:
+- `engine="magpie"` expects Python 3 plus `nemo_toolkit[tts]`, `torch`, and `numpy`.
+- Voice selectors use `speaker@lang`, for example `john@en`, `sofia@it`, or numeric aliases like `speaker0@it-IT`.
+- The bridge probes `python3` by default and respects `JACK_VOICE_MAGPIE_PYTHON` and `JACK_VOICE_MAGPIE_MODEL`.
 
 ## Related Docs
 

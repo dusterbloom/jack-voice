@@ -11,6 +11,42 @@ use crate::speaker::SttMode;
 /// Detect language from TTS voice name or ID.
 /// Returns a language code compatible with Whisper (e.g., "en", "it", "es").
 fn detect_language_from_voice(voice_name: &str) -> &'static str {
+    let lower = voice_name.to_lowercase();
+
+    if let Some(language_hint) = lower
+        .split_once('@')
+        .map(|(_, language)| language)
+        .or_else(|| lower.split_once(':').map(|(_, language)| language))
+    {
+        if language_hint.starts_with("it") {
+            return "it";
+        }
+        if language_hint.starts_with("es") {
+            return "es";
+        }
+        if language_hint.starts_with("fr") {
+            return "fr";
+        }
+        if language_hint.starts_with("de") {
+            return "de";
+        }
+        if language_hint.starts_with("hi") {
+            return "hi";
+        }
+        if language_hint.starts_with("ja") {
+            return "ja";
+        }
+        if language_hint.starts_with("pt") {
+            return "pt";
+        }
+        if language_hint.starts_with("zh") {
+            return "zh";
+        }
+        if language_hint.starts_with("en") {
+            return "en";
+        }
+    }
+
     // Try to parse voice name as integer (Kokoro voice ID)
     if let Ok(voice_id) = voice_name.parse::<i32>() {
         // Use voice_id_to_language mapping (from kokoro_tts.rs pattern)
@@ -29,7 +65,6 @@ fn detect_language_from_voice(voice_name: &str) -> &'static str {
     }
 
     // Check for language prefixes in voice name (if_sara, im_nicola, etc.)
-    let lower = voice_name.to_lowercase();
     if lower.starts_with("if_") || lower.starts_with("im_") || lower.contains("italian") {
         "it"
     } else if lower.starts_with("af_")
@@ -864,5 +899,22 @@ pub enum SttError {
 impl From<crate::models::ModelError> for SttError {
     fn from(e: crate::models::ModelError) -> Self {
         SttError::ModelNotFound(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_language_from_voice;
+
+    #[test]
+    fn detect_language_from_magpie_selector_suffix() {
+        assert_eq!(detect_language_from_voice("speaker0@it-IT"), "it");
+        assert_eq!(detect_language_from_voice("speaker2@zh-CN"), "zh");
+    }
+
+    #[test]
+    fn detect_language_from_magpie_selector_short_suffix() {
+        assert_eq!(detect_language_from_voice("speaker1:es"), "es");
+        assert_eq!(detect_language_from_voice("speaker4@en"), "en");
     }
 }

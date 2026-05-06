@@ -14,8 +14,8 @@ use audio::{
 use jack_voice::models::{self, ModelBundle, ModelError, ModelProgressCallback, MODEL_BUNDLES};
 use jack_voice::stt::SttBackend;
 use jack_voice::{
-    SpeechToText, SttError, SttMode, TextToSpeech, TtsEngine, TtsError, VadError,
-    VoiceActivityDetector,
+    magpie_runtime_available, SpeechToText, SttError, SttMode, TextToSpeech, TtsEngine, TtsError,
+    VadError, VoiceActivityDetector,
 };
 use protocol::{
     ErrorCode, EventEnvelope, RequestEnvelope, ResponseEnvelope, RpcError, RpcMethod,
@@ -34,7 +34,7 @@ struct BridgeState {
     stt: Option<SpeechToText>,
     stt_key: Option<SttCacheKey>,
     tts: Option<TextToSpeech>,
-    tts_requested_engine: Option<TtsEngine>,
+    tts_engine: Option<CachedTtsEngine>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +43,52 @@ struct SttCacheKey {
     language: Option<String>,
     tts_voice: Option<String>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachedTtsEngine {
+    Pocket,
+    Supertonic,
+    Kokoro,
+    Magpie,
+    Qwen,
+    QwenLarge,
+}
+
+impl CachedTtsEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pocket => "pocket",
+            Self::Supertonic => "supertonic",
+            Self::Kokoro => "kokoro",
+            Self::Magpie => "magpie",
+            Self::Qwen => "qwen",
+            Self::QwenLarge => "qwen-large",
+        }
+    }
+
+    fn as_jack_voice_engine(self) -> TtsEngine {
+        match self {
+            Self::Pocket => TtsEngine::Pocket,
+            Self::Supertonic => TtsEngine::Supertonic,
+            Self::Kokoro => TtsEngine::Kokoro,
+            Self::Magpie => TtsEngine::Magpie,
+            Self::Qwen => TtsEngine::Qwen,
+            Self::QwenLarge => TtsEngine::QwenLarge,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestedTtsEngine {
+    Auto,
+    Pocket,
+    Supertonic,
+    Kokoro,
+    Magpie,
+    Qwen,
+    QwenLarge,
+}
+
 
 struct MethodOutcome {
     result: Value,
@@ -435,7 +481,8 @@ fn build_models_status() -> Result<Value, RpcError> {
         "paraformer": models::paraformer_model_ready(),
         "parakeet_eou": models::parakeet_eou_ready(),
         "parakeet_tdt": models::parakeet_tdt_ready(),
-        "supertonic": supertonic_ready
+        "supertonic": supertonic_ready,
+        "magpie_runtime": magpie_runtime_available()
     });
 
     let mut missing = Vec::new();
@@ -836,15 +883,91 @@ fn duration_ms_for_samples(sample_count: usize, sample_rate: u32) -> u64 {
     }
 }
 
-fn ensure_tts_instance(state: &mut BridgeState, requested: TtsEngine) -> Result<(), RpcError> {
-    if state.tts_requested_engine.as_ref() == Some(&requested) && state.tts.is_some() {
-        return Ok(());
+fn ensure_tts_instance(
+    state: &mut BridgeState,
+    requested: RequestedTtsEngine,
+) -> Result<CachedTtsEngine, RpcError> {
+    match requested {
+        RequestedTtsEngine::Auto => {
+            if let Some(current) = state.tts_engine {
+                return Ok(current);
+            }
+
+            if TextToSpeech::can_run_qwen() {
+                if let Ok(tts) = TextToSpeech::with_engine(TtsEngine::Qwen) {
+                    state.tts = Some(tts);
+                    state.tts_engine = Some(CachedTtsEngine::Qwen);
+                    return Ok(CachedTtsEngine::Qwen);
+                }
+            }
+
+            match TextToSpeech::with_engine(TtsEngine::Pocket) {
+                Ok(tts) => {
+                    state.tts = Some(tts);
+                    state.tts_engine = Some(CachedTtsEngine::Pocket);
+                    Ok(CachedTtsEngine::Pocket)
+                }
+                Err(pocket_err) => {
+                    eprintln!(
+                        "[bridge] auto TTS fallback: pocket init failed ({pocket_err}), trying kokoro"
+                    );
+
+                    match TextToSpeech::with_engine(TtsEngine::Kokoro) {
+                        Ok(kokoro) => {
+                            state.tts = Some(kokoro);
+                            state.tts_engine = Some(CachedTtsEngine::Kokoro);
+                            Ok(CachedTtsEngine::Kokoro)
+                        }
+                        Err(kokoro_err) => {
+                            eprintln!(
+                                "[bridge] auto TTS fallback: kokoro init failed ({kokoro_err}), trying magpie"
+                            );
+
+                            match TextToSpeech::with_engine(TtsEngine::Magpie) {
+                                Ok(magpie) => {
+                                    state.tts = Some(magpie);
+                                    state.tts_engine = Some(CachedTtsEngine::Magpie);
+                                    Ok(CachedTtsEngine::Magpie)
+                                }
+                                Err(magpie_err) => {
+                                    eprintln!(
+                                        "[bridge] auto TTS fallback: magpie init failed ({magpie_err}), trying supertonic"
+                                    );
+
+                                    let supertonic =
+                                        TextToSpeech::with_engine(TtsEngine::Supertonic)
+                                            .map_err(map_tts_error)?;
+                                    state.tts = Some(supertonic);
+                                    state.tts_engine = Some(CachedTtsEngine::Supertonic);
+                                    Ok(CachedTtsEngine::Supertonic)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        RequestedTtsEngine::Pocket => set_tts_engine(state, CachedTtsEngine::Pocket),
+        RequestedTtsEngine::Supertonic => set_tts_engine(state, CachedTtsEngine::Supertonic),
+        RequestedTtsEngine::Kokoro => set_tts_engine(state, CachedTtsEngine::Kokoro),
+        RequestedTtsEngine::Magpie => set_tts_engine(state, CachedTtsEngine::Magpie),
+        RequestedTtsEngine::Qwen => set_tts_engine(state, CachedTtsEngine::Qwen),
+        RequestedTtsEngine::QwenLarge => set_tts_engine(state, CachedTtsEngine::QwenLarge),
+    }
+}
+
+fn set_tts_engine(
+    state: &mut BridgeState,
+    target: CachedTtsEngine,
+) -> Result<CachedTtsEngine, RpcError> {
+    if state.tts_engine == Some(target) {
+        return Ok(target);
     }
 
-    let tts = TextToSpeech::with_engine(requested.clone()).map_err(map_tts_error)?;
+    let tts = TextToSpeech::with_engine(target.as_jack_voice_engine()).map_err(map_tts_error)?;
     state.tts = Some(tts);
-    state.tts_requested_engine = Some(requested);
-    Ok(())
+    state.tts_engine = Some(target);
+    Ok(target)
 }
 
 fn parse_stt_mode(mode: Option<&str>) -> Result<SttMode, RpcError> {
@@ -860,14 +983,17 @@ fn parse_stt_mode(mode: Option<&str>) -> Result<SttMode, RpcError> {
     }
 }
 
-fn parse_tts_engine(engine: Option<&str>) -> Result<TtsEngine, RpcError> {
+fn parse_tts_engine(engine: Option<&str>) -> Result<RequestedTtsEngine, RpcError> {
     let engine = engine.unwrap_or("auto").trim().to_ascii_lowercase();
 
     match engine.as_str() {
-        "auto" => Ok(TtsEngine::Auto),
-        "pocket" => Ok(TtsEngine::Pocket),
-        "supertonic" => Ok(TtsEngine::Supertonic),
-        "kokoro" => Ok(TtsEngine::Kokoro),
+        "auto" => Ok(RequestedTtsEngine::Auto),
+        "pocket" => Ok(RequestedTtsEngine::Pocket),
+        "supertonic" => Ok(RequestedTtsEngine::Supertonic),
+        "kokoro" => Ok(RequestedTtsEngine::Kokoro),
+        "magpie" => Ok(RequestedTtsEngine::Magpie),
+        "qwen" => Ok(RequestedTtsEngine::Qwen),
+        "qwen-large" | "qwenlarge" => Ok(RequestedTtsEngine::QwenLarge),
         other => Err(RpcError::new(
             ErrorCode::InvalidParams,
             format!("Unsupported tts engine '{other}'"),
@@ -962,17 +1088,24 @@ mod tests {
     fn parse_tts_engine_accepts_pocket() {
         assert!(matches!(
             parse_tts_engine(Some("pocket")),
-            Ok(TtsEngine::Pocket)
+            Ok(RequestedTtsEngine::Pocket)
         ));
         assert!(matches!(
             parse_tts_engine(Some("POCKET")),
-            Ok(TtsEngine::Pocket)
+            Ok(RequestedTtsEngine::Pocket)
         ));
     }
 
     #[test]
-    fn parse_tts_engine_accepts_auto() {
-        assert!(matches!(parse_tts_engine(None), Ok(TtsEngine::Auto)));
+    fn parse_tts_engine_accepts_magpie() {
+        assert!(matches!(
+            parse_tts_engine(Some("magpie")),
+            Ok(RequestedTtsEngine::Magpie)
+        ));
+        assert!(matches!(
+            parse_tts_engine(Some("MAGPIE")),
+            Ok(RequestedTtsEngine::Magpie)
+        ));
     }
 
     #[test]
