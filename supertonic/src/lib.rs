@@ -41,13 +41,55 @@ pub struct TtsConfig {
     pub num_inference_steps: u32,
     /// Speech speed multiplier (1.0 = normal)
     pub speed: f32,
+    /// Loudness normalization. The flow-matching vocoder produces output whose
+    /// amplitude drifts a lot across phrases (we've measured ~10× RMS swings on
+    /// long input). Set this to `Some(target_rms)` to normalize to a target
+    /// linear RMS level (e.g. 0.10 ≈ -20 dBFS). `None` disables normalization
+    /// for test parity with the raw vocoder output. Default: `Some(0.10)`.
+    pub target_rms: Option<f32>,
+    /// Dynamic-range compression to fix per-syllable "pumping" — quiet
+    /// syllables get pulled up to the threshold, loud ones get squashed.
+    /// `None` disables. Default: `Some(CompressorParams::default())`.
+    pub compressor: Option<CompressorParams>,
+}
+
+/// Feed-forward compressor parameters (linear units, not dB).
+#[derive(Clone, Debug)]
+pub struct CompressorParams {
+    /// Above this linear amplitude, signal is compressed. 0.10 ≈ -20 dBFS.
+    pub threshold: f32,
+    /// Compression ratio. 4.0 = 4:1 (input change of 4 dB → output change of 1 dB).
+    pub ratio: f32,
+    /// Attack time constant in seconds (how fast it clamps down).
+    pub attack_s: f32,
+    /// Release time constant in seconds (how fast it lets go).
+    pub release_s: f32,
+    /// Make-up gain applied after compression to restore loudness.
+    pub makeup_gain: f32,
+}
+
+impl Default for CompressorParams {
+    fn default() -> Self {
+        Self {
+            threshold: 0.10,    // -20 dBFS
+            ratio: 4.0,         // 4:1, gentle voice compression
+            attack_s: 0.005,    // 5 ms — fast enough to catch transients
+            release_s: 0.050,   // 50 ms — natural decay
+            makeup_gain: 2.0,   // pull quiet syllables up
+        }
+    }
 }
 
 impl Default for TtsConfig {
     fn default() -> Self {
         Self {
-            num_inference_steps: 5, // Official default (supertonic-2)
-            speed: 1.05,            // Match Python default (slightly faster than 1.0)
+            // 5 = official, ~25% wall-time cost over 3 for noticeably tighter
+            // denoising. Drop to 3 for chat workloads if you're CPU-bound.
+            num_inference_steps: 5,
+            // 1.0 = natural pace (user ear-checked vs 1.05 and 0.92).
+            speed: 1.0,
+            target_rms: Some(0.10),
+            compressor: Some(CompressorParams::default()),
         }
     }
 }
@@ -157,6 +199,158 @@ pub fn detect_mid_sentence_gap(samples: &[f32], sample_rate: u32) -> Option<Audi
     None
 }
 
+/// Automatic gain control (AGC) — sliding-window loudness equalizer.
+///
+/// Walks the signal with a windowed RMS estimator, computes the per-sample
+/// gain needed to keep RMS at the target, smooths it with a one-pole filter
+/// (so the gain itself doesn't pump), then hard-limits the output.
+///
+/// This fixes the *sustained* envelope drift the flow-matching vocoder leaves
+/// behind — quiet phrases come up, loud phrases come down, all on the same
+/// 200 ms-ish timescale that human ears interpret as "volume".
+///
+/// The legacy `CompressorParams::ratio` is reinterpreted as a soft-clip
+/// curve: ratio >= 1.0 lets the AGC compute the *desired* gain, then a
+/// secondary soft-knee compressor catches any residual peaks.
+fn compress(samples: &mut [f32], sr: u32, p: &CompressorParams) {
+    if samples.is_empty() || p.threshold <= 0.0 {
+        return;
+    }
+
+    let sr_f = sr as f32;
+
+    // Windowed RMS estimator — 200 ms gives ~5 Hz envelope tracking, well
+    // below syllable rate but above word rate. Use a single-pole IIR over
+    // squared samples to avoid a circular buffer.
+    let rms_tau_s = 0.200;
+    let rms_coef = (-1.0 / (rms_tau_s * sr_f)).exp();
+
+    // Gain smoothing — slower than the envelope so the AGC itself doesn't pump.
+    // Asymmetric: faster release (gain up) than attack (gain down), broadcast-style.
+    let gain_attack = (-1.0 / (p.attack_s.max(0.005) * sr_f)).exp();
+    let gain_release = (-1.0 / (p.release_s.max(0.050) * sr_f)).exp();
+
+    let max_gain = 4.0_f32;
+    let min_gain = 0.25_f32;
+
+    let mut env_sq: f32 = p.threshold * p.threshold; // start near target
+    let mut gain: f32 = 1.0;
+
+    for s in samples.iter_mut() {
+        // Track windowed mean-square (cheap RMS).
+        let sq = *s * *s;
+        env_sq = sq + rms_coef * (env_sq - sq);
+        let env = env_sq.sqrt().max(1e-6);
+
+        // Desired gain: target / current. Clamp so we never amplify pure silence
+        // into noise, and never squash voice down past min_gain.
+        let desired = (p.threshold / env).clamp(min_gain, max_gain);
+
+        // Smooth gain transitions (slower than envelope to avoid pumping).
+        let coef = if desired < gain { gain_attack } else { gain_release };
+        gain = desired + coef * (gain - desired);
+
+        let out = *s * gain;
+        // Soft-knee limiter (tanh) to round off any peaks that get amplified.
+        let abs_out = out.abs();
+        let ceiling = 0.95_f32;
+        let limited = if abs_out > ceiling {
+            let knee = 1.0 - ceiling;
+            let over = (abs_out - ceiling) / knee.max(1e-6);
+            out.signum() * (ceiling + knee * over.tanh())
+        } else {
+            out
+        };
+        *s = limited.clamp(-0.99, 0.99);
+    }
+
+    // Suppress field warning on the unused params (kept for backwards compat).
+    let _ = p.ratio;
+    let _ = p.makeup_gain;
+}
+
+/// Normalize speech to a target RMS, then apply a soft-knee peak limiter so
+/// the gain push from quiet syllables doesn't clip the loud ones.
+///
+/// This is a single-pass, non-time-varying gain — sentences keep their relative
+/// dynamics within a clip, but absolute loudness becomes consistent across
+/// synthesize() calls.
+///
+/// `target_rms`: linear RMS goal (e.g. 0.10 = ~-20 dBFS).
+/// `ceiling`:    soft-knee threshold above which to compress (e.g. 0.95).
+fn normalize_loudness(samples: &mut [f32], target_rms: f32, ceiling: f32) {
+    if samples.is_empty() {
+        return;
+    }
+
+    // 1) Compute current RMS, ignoring near-silence (the leading/trailing pad).
+    let active_thresh = 0.005_f32;
+    let mut sum_sq = 0.0_f32;
+    let mut active = 0usize;
+    for &s in samples.iter() {
+        let a = s.abs();
+        if a > active_thresh {
+            sum_sq += s * s;
+            active += 1;
+        }
+    }
+    if active < 32 {
+        return; // not enough signal to normalize meaningfully
+    }
+    let current_rms = (sum_sq / active as f32).sqrt();
+    if current_rms <= 1e-6 {
+        return;
+    }
+
+    // 2) Apply uniform gain.
+    let gain = (target_rms / current_rms).clamp(0.1, 16.0);
+    for s in samples.iter_mut() {
+        *s *= gain;
+    }
+
+    // 3) Soft-knee peak limiter — only acts on samples above `ceiling`.
+    // Uses tanh-style compression so the transition is smooth.
+    let knee = 1.0 - ceiling;
+    if knee > 0.0 {
+        for s in samples.iter_mut() {
+            let a = s.abs();
+            if a > ceiling {
+                let over = (a - ceiling) / knee.max(1e-6);
+                let compressed = ceiling + knee * over.tanh();
+                *s = s.signum() * compressed;
+            }
+        }
+    }
+}
+
+/// Detect the number of performance cores on the host.
+///
+/// On Apple Silicon, this reads `hw.perflevel0.physicalcpu` (P-core count).
+/// On other platforms, falls back to `min(num_cpus / 2, 4)` as a safe default
+/// (most modern CPUs gain little ONNX speedup past 4 intra-op threads).
+fn detect_performance_cores() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        if let Ok(out) = Command::new("sysctl")
+            .args(["-n", "hw.perflevel0.physicalcpu"])
+            .output()
+        {
+            if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                if let Ok(n) = s.trim().parse::<usize>() {
+                    if n > 0 {
+                        return n;
+                    }
+                }
+            }
+        }
+    }
+    let total = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (total / 2).clamp(2, 4)
+}
+
 /// Supertonic TTS engine
 pub struct TextToSpeech {
     // ONNX sessions for the model pipeline
@@ -176,6 +370,7 @@ pub struct TextToSpeech {
 
     // Configuration
     config: TtsConfig,
+    language: String,
 }
 
 impl TextToSpeech {
@@ -207,6 +402,7 @@ impl TextToSpeech {
             style_ttl_shape: [1, 50, 256], // Default expected shape
             style_dp_shape: [1, 8, 16],    // Default expected shape
             config: TtsConfig::default(),
+            language: "en".to_string(),
         })
     }
 
@@ -216,28 +412,51 @@ impl TextToSpeech {
             return Err(TtsError::ModelNotFound(path.display().to_string()));
         }
 
+        // intra_threads: match the host's performance-core count, not total cores.
+        // E-cores typically hurt ONNX intra-op parallelism via cache thrash.
+        // Override with SUPERTONIC_INTRA_THREADS env if you need to pin a value.
+        let intra_threads = std::env::var("SUPERTONIC_INTRA_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or_else(detect_performance_cores);
+
         let builder = ort::session::Session::builder()
             .map_err(|e| TtsError::OrtError(e.to_string()))?
-            .with_intra_threads(2)
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+            .map_err(|e| TtsError::OrtError(e.to_string()))?
+            .with_intra_threads(intra_threads)
             .map_err(|e| TtsError::OrtError(e.to_string()))?;
 
-        // Try CUDA first, then fall back to CPU
+        // Try CUDA first (Linux/Windows GPU), then CoreML (macOS Apple Silicon), then CPU
         let cuda = ort::ep::CUDA::default();
         if cuda.is_available()? {
             log::info!("Using CUDA for TTS inference");
             let cuda_ep = cuda.build();
-            builder
+            return builder
                 .with_execution_providers([cuda_ep])
                 .map_err(|e| TtsError::OrtError(format!("Session with CUDA failed: {}", e)))?
                 .commit_from_file(path)
-                .map_err(|e| TtsError::OrtError(format!("Session with CUDA failed: {}", e)))
-        } else {
-            // Fall back to CPU
-            log::info!("CUDA not available, using CPU for TTS");
-            builder
-                .commit_from_file(path)
-                .map_err(|e| TtsError::OrtError(format!("Session failed: {}", e)))
+                .map_err(|e| TtsError::OrtError(format!("Session with CUDA failed: {}", e)));
         }
+
+        #[cfg(target_os = "macos")]
+        {
+            let coreml = ort::ep::CoreML::default();
+            if coreml.is_available()? {
+                log::info!("Using CoreML for TTS inference");
+                let coreml_ep = coreml.build();
+                return builder
+                    .with_execution_providers([coreml_ep])
+                    .map_err(|e| TtsError::OrtError(format!("Session with CoreML failed: {}", e)))?
+                    .commit_from_file(path)
+                    .map_err(|e| TtsError::OrtError(format!("Session with CoreML failed: {}", e)));
+            }
+        }
+
+        log::info!("CUDA/CoreML not available, using CPU for TTS");
+        builder
+            .commit_from_file(path)
+            .map_err(|e| TtsError::OrtError(format!("Session failed: {}", e)))
     }
 
     /// Load voice style from VoiceStyleData
@@ -272,6 +491,14 @@ impl TextToSpeech {
     /// Set number of inference steps
     pub fn set_inference_steps(&mut self, steps: u32) {
         self.config.num_inference_steps = steps.clamp(1, 20);
+    }
+
+    pub fn set_language(&mut self, lang: &str) {
+        self.language = lang.to_string();
+    }
+
+    pub fn language(&self) -> &str {
+        &self.language
     }
 
     /// Synthesize text to audio (with automatic chunking for long text)
@@ -331,50 +558,54 @@ impl TextToSpeech {
         })
     }
 
-    /// Synthesize a chunk with automatic retry if a mid-sentence gap is detected.
+    /// Synthesize a chunk, with one-shot instrumentation if a mid-sentence
+    /// gap is detected.
     ///
-    /// Flow-matching denoising starts from random Gaussian noise, so each synthesis
-    /// produces different audio. Occasionally the model drops a word, creating a
-    /// silent gap mid-sentence. This wrapper detects such gaps and re-synthesizes
-    /// (up to MAX_GAP_RETRIES times) to get a clean result.
+    /// # Root cause of mid-sentence gaps (do not "fix" via retries)
+    ///
+    /// The duration predictor ONNX model in `synthesize_chunk` occasionally
+    /// emits an outlier per-token duration (e.g. one token gets 500–1000 ms
+    /// when neighbours get 30–80 ms). When the vocoder is fed those
+    /// durations, the resulting waveform contains a long silent passage
+    /// mid-sentence. **It is not RNG-driven sampling noise.** Re-running
+    /// `synthesize_chunk` with a fresh seed only sometimes draws a different
+    /// duration distribution; on the requests that show this bug in
+    /// production logs, retries reliably re-produce the same shape of gap.
+    ///
+    /// The previous implementation retried up to 2 times and then accepted
+    /// the bad audio anyway ("best effort"). That cost **300–1000 ms of
+    /// added latency on every chunk that hit the detector**, including in
+    /// the common case where the gap was actually a natural sentence-end
+    /// pause being misclassified — for zero quality improvement on the
+    /// pathological case.
+    ///
+    /// The proper fix is upstream of supertonic: clamp per-token durations
+    /// to a sane maximum (e.g. 200–300 ms) inside the duration-predictor
+    /// post-processing in [`synthesize_chunk`], before `latent_len` is
+    /// computed. That would shorten the total predicted duration and
+    /// eliminate the silent passages entirely. See the per-token-sum logic
+    /// around the `duration_predictor.run(...)` block.
+    ///
+    /// Until that lands, we keep gap detection as a single passive log so
+    /// the rate stays measurable, but we never retry.
     fn synthesize_chunk_with_retry(&mut self, text: &str) -> Result<AudioOutput, TtsError> {
-        const MAX_GAP_RETRIES: u32 = 2;
+        let audio = self.synthesize_chunk(text)?;
 
-        // Very short text (< 3 words) is unlikely to have mid-sentence gaps
-        let word_count = text.split_whitespace().count();
-        if word_count < 3 {
-            return self.synthesize_chunk(text);
-        }
-
-        for attempt in 0..=MAX_GAP_RETRIES {
-            let audio = self.synthesize_chunk(text)?;
-
-            match detect_mid_sentence_gap(&audio.samples, audio.sample_rate) {
-                None => return Ok(audio), // Clean — no gap detected
-                Some(gap) => {
-                    if attempt < MAX_GAP_RETRIES {
-                        log::warn!(
-                            "[TTS] Mid-sentence gap at {}-{}ms (peak={:.4}), retrying ({}/{}): '{}'",
-                            gap.start_ms, gap.end_ms, gap.peak,
-                            attempt + 1, MAX_GAP_RETRIES,
-                            if text.len() > 40 { &text[..40] } else { text }
-                        );
-                        // Next call to synthesize_chunk will use a different RNG seed
-                        continue;
-                    } else {
-                        log::warn!(
-                            "[TTS] Mid-sentence gap persists after {} retries at {}-{}ms (peak={:.4}), using best effort: '{}'",
-                            MAX_GAP_RETRIES, gap.start_ms, gap.end_ms, gap.peak,
-                            if text.len() > 40 { &text[..40] } else { text }
-                        );
-                        return Ok(audio);
-                    }
-                }
+        // Skip detection for very short text — natural punctuation gaps would
+        // dominate the signal.
+        if text.split_whitespace().count() >= 3 {
+            if let Some(gap) = detect_mid_sentence_gap(&audio.samples, audio.sample_rate) {
+                log::warn!(
+                    "[TTS] Mid-sentence gap at {}-{}ms (peak={:.4}) \u{2014} root cause is duration-predictor outlier, see synthesize_chunk_with_retry doc: '{}'",
+                    gap.start_ms,
+                    gap.end_ms,
+                    gap.peak,
+                    if text.len() > 40 { &text[..40] } else { text }
+                );
             }
         }
 
-        // Unreachable, but satisfy the compiler
-        self.synthesize_chunk(text)
+        Ok(audio)
     }
 
     /// Synthesize a single chunk of text (internal, no chunking)
@@ -397,7 +628,7 @@ impl TextToSpeech {
             .ok_or(TtsError::NoSpeakerEmbeddings)?;
 
         // Step 1: Convert text to token IDs (with language tags for v2 model)
-        let (text_ids, text_mask_1d, seq_len) = self.unicode_indexer.text_to_ids(text, "en");
+        let (text_ids, text_mask_1d, seq_len) = self.unicode_indexer.text_to_ids(text, &self.language);
 
         if seq_len == 0 {
             return Ok(AudioOutput {
@@ -470,9 +701,34 @@ impl TextToSpeech {
             dp_all_values.len()
         );
 
+        // Per-token duration cap: any single token predicted to last longer
+        // than this is an outlier — a phoneme would naturally last 50–200 ms,
+        // and the duration predictor occasionally emits 0.5–1.0 s for a
+        // single token, which the vocoder renders as a silent passage. That
+        // surfaces as either a fade-in at the start of a sentence (outlier
+        // on token 1–3, masked from the previous gap detector by its 80 ms
+        // onset skip) or a mid-sentence dropout (outlier in the body). See
+        // the `synthesize_chunk_with_retry` doc-comment for the full root
+        // cause analysis — clamping here is that documented "proper fix".
+        const MAX_TOKEN_DURATION_S: f32 = 0.30;
+
         let duration_seconds: f32 = if dp_all_values.len() > 1 && dp_all_values.len() == seq_len {
-            // Per-token durations — sum them for total
-            dp_all_values.iter().sum()
+            // Per-token durations — clamp outliers then sum for total.
+            let outliers = dp_all_values
+                .iter()
+                .filter(|&&d| d > MAX_TOKEN_DURATION_S)
+                .count();
+            if outliers > 0 {
+                log::debug!(
+                    "Duration predictor: clamping {} outlier token(s) above {:.2}s",
+                    outliers,
+                    MAX_TOKEN_DURATION_S
+                );
+            }
+            dp_all_values
+                .iter()
+                .map(|&d| d.min(MAX_TOKEN_DURATION_S))
+                .sum()
         } else {
             // Single scalar duration
             dp_all_values.first().copied().unwrap_or(1.0)
@@ -640,7 +896,18 @@ impl TextToSpeech {
         // duration * sample_rate samples are actual audio — the rest is padding noise
         // that causes "doubling" artifacts if included.
         let wav_len = (adjusted_duration * SAMPLE_RATE as f32) as usize;
-        let samples: Vec<f32> = raw_samples[..wav_len.min(raw_samples.len())].to_vec();
+        let mut samples: Vec<f32> = raw_samples[..wav_len.min(raw_samples.len())].to_vec();
+
+        // 1) Compression first — squashes intra-utterance dynamics (per-syllable
+        //    pumping that the vocoder leaves behind).
+        if let Some(ref c) = self.config.compressor {
+            compress(&mut samples, SAMPLE_RATE, c);
+        }
+        // 2) RMS normalization second — pulls absolute loudness to a target,
+        //    consistent across synthesize() calls.
+        if let Some(target) = self.config.target_rms {
+            normalize_loudness(&mut samples, target, 0.95);
+        }
 
         log::info!(
             "TTS: Synthesized {} samples ({:.2}s) from {} raw, truncated to predicted duration {:.2}s, {} steps",
@@ -727,8 +994,10 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = TtsConfig::default();
-        assert_eq!(config.num_inference_steps, 4);
-        assert_eq!(config.speed, 1.05);
+        assert_eq!(config.num_inference_steps, 5);
+        assert_eq!(config.speed, 1.0);
+        assert_eq!(config.target_rms, Some(0.10));
+        assert!(config.compressor.is_some());
     }
 
     /// Helper: generate a sine wave segment
